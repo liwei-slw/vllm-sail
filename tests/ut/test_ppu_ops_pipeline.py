@@ -385,7 +385,8 @@ def test_manual_ops_image_input_contract():
     assert "ops_image" in inputs
     assert "device_image" not in inputs
     assert inputs["ops_image"]["type"] == "string"
-    assert inputs["ops_image"]["default"] == ""
+    assert inputs["ops_image"]["default"] == inputs["build_image"]["default"]
+    assert re.fullmatch(r".+@sha256:[0-9a-f]{64}", inputs["ops_image"]["default"])
     step = next(
         s
         for s in workflow["jobs"]["detect-ops-changes"]["steps"]

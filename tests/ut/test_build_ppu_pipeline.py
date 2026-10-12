@@ -27,12 +27,13 @@ def test_build_script_preserves_required_build_contract() -> None:
     text = SCRIPT.read_text()
     required = (
         "set -Eeuo pipefail",
-        "ppu_1.0.0_Ubuntu2404_v13_release.run",
-        "ppu_sdk_hggcrt3-pytorch2.13.0-ubuntu2404-py312.tar.gz",
+        "ppu_image_stack.py",
+        "stack_source=image",
+        'export PIP_CONSTRAINT="${WORK_DIR}/image-constraints.txt"',
         ".github/vllm-main-verified.commit",
         "unset TORCH_CUDA_ARCH_LIST",
         "command -v hgcc",
-        "command -v nvcc",
+        "compatible_wrapper.h",
         "python tools/use_existing_torch.py",
         "VLLM_TARGET_DEVICE=empty",
         "VLLM_REQUIRE_RUST_FRONTEND=1",
@@ -181,3 +182,201 @@ def test_rust_build_is_explicit_before_wheel_packaging() -> None:
     wheel = text.index("python -m pip wheel --verbose")
     assert required < rust < check < wheel
     assert "vllm-rust-build.log" in text
+
+
+def test_image_build_never_downloads_or_replaces_sdk_and_torch():
+    text = SCRIPT.read_text()
+    for forbidden in (
+        "SDK_URL",
+        "TORCH_URL",
+        "SDK_INSTALLER",
+        "TORCH_ARCHIVE",
+        'mv "${path}"',
+        "torch_wheels",
+        "download()",
+    ):
+        assert forbidden not in text
+    capture = text.index('ppu_image_stack.py" capture')
+    verify = text.index('ppu_image_stack.py" verify')
+    assert capture < text.index("python -m pip install") < verify
+    assert verify < text.index("status=succeeded")
+
+
+def test_all_ci_paths_use_the_same_pinned_image_stack():
+    import yaml
+
+    image = "reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb"
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    assert not {"sdk_url", "torch_url"} & inputs.keys()
+    assert inputs["build_image"]["default"] == image
+    assert inputs["ops_image"]["default"] == image
+    build = workflow["jobs"]["build"]
+    assert image in build["container"]["image"]
+    assert build["env"]["VLLM_SAIL_BUILD_IMAGE"] == build["container"]["image"]
+    for job in ("pin-unit-tests", "smoke"):
+        assert "needs.build.outputs.image" in workflow["jobs"][job]["with"]["image"]
+    for name in ("ppu-pin-ut.yaml", "e2e-ppu.yaml"):
+        triggers = yaml.safe_load((WORKFLOW.parent / name).read_text())[True]
+        for trigger in triggers.values():
+            assert trigger["inputs"]["image"]["default"] == image
+
+
+@pytest.fixture
+def image_stack():
+    import importlib.util
+
+    path = ROOT / "scripts/ci/ppu_image_stack.py"
+    assert path.is_file(), "image stack fingerprint helper is missing"
+    spec = importlib.util.spec_from_file_location("image_stack", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def stack_trees(tmp_path):
+    sdk = tmp_path / "sdk"
+    torch = tmp_path / "torch"
+    sdk.mkdir()
+    torch.mkdir()
+    (sdk / "hgcc").write_bytes(b"compiler")
+    (torch / "_C.so").write_bytes(b"torch")
+    return sdk, torch
+
+
+def test_image_stack_hashes_installed_contents_and_ignores_bytecode(
+    image_stack, stack_trees
+):
+    sdk, torch = stack_trees
+    before = image_stack.snapshot(sdk, torch, "2.13.0", {"torch": "2.13.0"})
+    (torch / "__pycache__").mkdir()
+    (torch / "__pycache__/generated.pyc").write_bytes(b"cache")
+    after = image_stack.snapshot(sdk, torch, "2.13.0", {"torch": "2.13.0"})
+    image_stack.verify_unchanged(before, after)
+    assert before["stack_source"] == "image"
+    assert len(before["sdk_sha256"]) == len(before["torch_sha256"]) == 64
+    assert before["sdk_sha256"] != before["torch_sha256"]
+
+
+@pytest.mark.parametrize("component", ["sdk", "torch", "packages", "version"])
+def test_image_stack_rejects_changes(image_stack, stack_trees, component):
+    sdk, torch = stack_trees
+    versions = {"torch": "2.13.0", "triton": "3.5.0"}
+    before = image_stack.snapshot(sdk, torch, "2.13.0", versions)
+    version = "2.13.0"
+    if component == "sdk":
+        (sdk / "hgcc").write_bytes(b"replaced")
+    elif component == "torch":
+        (torch / "_C.so").write_bytes(b"replaced")
+    elif component == "packages":
+        versions = {**versions, "triton": "3.6.0"}
+    else:
+        version = "2.14.0"
+    after = image_stack.snapshot(sdk, torch, version, versions)
+    with pytest.raises(ValueError, match="image stack changed"):
+        image_stack.verify_unchanged(before, after)
+
+
+def test_image_stack_constraints_protect_installed_and_absent_device_packages(
+    image_stack,
+):
+    from packaging.requirements import Requirement
+
+    constraints = image_stack.constraints_text(
+        {"torch": "2.13.0+ppu", "triton": "3.5.0"}
+    )
+    requirements = {r.name: r for r in map(Requirement, constraints.splitlines())}
+    assert requirements["torch"].specifier.contains("2.13.0+ppu")
+    assert not requirements["torch"].specifier.contains("2.13.0")
+    assert not requirements["triton"].specifier.contains("3.6.0")
+    assert not requirements["flash-attn"].specifier.contains("2.8.2")
+    assert "vllm" not in requirements
+
+
+def test_image_stack_rejects_missing_sdk(image_stack, tmp_path):
+    with pytest.raises(ValueError, match="missing or empty"):
+        image_stack.tree_digest(tmp_path / "missing")
+
+
+def test_image_stack_hashes_symlinked_library_directories(
+    image_stack, stack_trees, tmp_path
+):
+    sdk, _ = stack_trees
+    libraries = tmp_path / "libraries"
+    libraries.mkdir()
+    (libraries / "runtime.so").write_bytes(b"runtime")
+    (sdk / "lib").symlink_to(libraries, target_is_directory=True)
+    before = image_stack.tree_digest(sdk)
+    (libraries / "runtime.so").write_bytes(b"replacement")
+    assert image_stack.tree_digest(sdk) != before
+
+
+def test_image_stack_handles_directory_symlink_cycles(image_stack, stack_trees):
+    sdk, _ = stack_trees
+    (sdk / "back").symlink_to(sdk, target_is_directory=True)
+    before = image_stack.tree_digest(sdk)
+    assert image_stack.tree_digest(sdk) == before
+    (sdk / "hgcc").write_bytes(b"changed")
+    assert image_stack.tree_digest(sdk) != before
+
+
+def test_image_stack_hashes_symlinked_files(image_stack, stack_trees, tmp_path):
+    sdk, _ = stack_trees
+    library = tmp_path / "runtime.so"
+    library.write_bytes(b"runtime")
+    (sdk / "runtime.so").symlink_to(library)
+    before = image_stack.tree_digest(sdk)
+    library.write_bytes(b"replacement")
+    assert image_stack.tree_digest(sdk) != before
+
+
+def test_image_stack_rejects_empty_sdk(image_stack, tmp_path):
+    with pytest.raises(ValueError, match="missing or empty"):
+        image_stack.tree_digest(tmp_path)
+
+
+def test_image_stack_cli_capture_verify_and_refuse_mutation(tmp_path):
+    sdk = tmp_path / "sdk"
+    sdk.mkdir()
+    (sdk / "hgcc").write_bytes(b"compiler")
+    site = tmp_path / "site"
+    torch = site / "torch"
+    torch.mkdir(parents=True)
+    (torch / "__init__.py").write_text('__version__ = "2.13.0"\n')
+    dist = site / "torch-2.13.0.dist-info"
+    dist.mkdir()
+    (dist / "METADATA").write_text("Name: torch\nVersion: 2.13.0\n")
+    output = tmp_path / "stack.json"
+    constraints = tmp_path / "constraints.txt"
+    script = ROOT / "scripts/ci/ppu_image_stack.py"
+
+    def run(command, *extra):
+        return subprocess.run(
+            [
+                sys.executable,
+                str(script),
+                command,
+                "--sdk",
+                str(sdk),
+                "--output",
+                str(output),
+                *extra,
+            ],
+            env={**os.environ, "PYTHONPATH": str(site)},
+            capture_output=True,
+            text=True,
+            cwd=tmp_path,
+        )
+
+    captured = run("capture", "--constraints", str(constraints))
+    assert captured.returncode == 0, captured.stderr
+    assert "stack_source=image" in captured.stdout
+    assert "torch===2.13.0" in constraints.read_text()
+    verified = run("verify")
+    assert verified.returncode == 0, verified.stderr
+    assert "stack_unchanged=true" in verified.stdout
+    (sdk / "hgcc").write_bytes(b"changed")
+    refused = run("verify")
+    assert refused.returncode != 0
+    assert "image stack changed: sdk_sha256" in refused.stderr
