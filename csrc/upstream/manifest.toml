@@ -120,6 +120,15 @@ _moe_C_stable_libtorch = "_upstream_moe_C"
 "          __syncwarp();\n        }\n      }\n\n      // Store." = "          VLLM_SAIL_ROPE_SYNCWARP();\n        }\n      }\n\n      // Store."
 "  // Select token_heads_per_warp: forced value if >0, else auto-select." = "  if (num_tokens == 0) return;\n\n  // Select token_heads_per_warp: forced value if >0, else auto-select."
 
+# The GDN double buffer uses ordinary 16-byte loads/stores on HGGC. Upstream's
+# block-wide barrier after cp_async_wait_all still orders each completed tile;
+# the CUDA branch retains its asynchronous PTX pipeline unchanged.
+[overlay.replace_text."csrc/libtorch_stable/gdn/fused_gdn_decode_kernel.cu"]
+"  const uint32_t smem_addr =" = "#if defined(__HGGCCC__)\n  *reinterpret_cast<int4*>(smem_ptr) =\n      *reinterpret_cast<const int4*>(gmem_ptr);\n#else\n  const uint32_t smem_addr ="
+"               : \"r\"(smem_addr), \"l\"(gmem_ptr));" = "               : \"r\"(smem_addr), \"l\"(gmem_ptr));\n#endif"
+"  asm volatile(\"cp.async.commit_group;\\n\" ::);" = "#if !defined(__HGGCCC__)\n  asm volatile(\"cp.async.commit_group;\\n\" ::);\n#endif"
+"  asm volatile(\"cp.async.wait_all;\\n\" ::: \"memory\");" = "#if !defined(__HGGCCC__)\n  asm volatile(\"cp.async.wait_all;\\n\" ::: \"memory\");\n#endif"
+
 # ---------------------------------------------------------------------------
 # Tier a -- core inference.
 # ---------------------------------------------------------------------------
@@ -174,6 +183,13 @@ path = "csrc/libtorch_stable/layernorm_kernels.cu"
 tier = "a"
 hazards = ["cub"]
 ops = ["fused_add_rms_norm", "rms_norm"]
+
+[[entry]]
+path = "csrc/libtorch_stable/gdn/fused_gdn_decode_kernel.cu"
+tier = "a"
+hazards = ["cp_async", "ptx"]
+ops = ["fused_gdn_decode_post_conv_mtp"]
+notes = "GDN MTP post-conv recurrence and gated RMSNorm, BF16/FP32 state. HGGC uses synchronous aligned copies through the declared overlay; warp shuffles and block barriers retain upstream semantics. Native compilation and PPU correctness validation pending."
 
 [[entry]]
 path = "csrc/libtorch_stable/layernorm_quant_kernels.cu"
