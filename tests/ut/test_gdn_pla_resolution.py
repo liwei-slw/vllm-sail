@@ -65,3 +65,17 @@ def test_missing_pla_falls_back_only_for_auto(pla_loader, monkeypatch):
     monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", "pla")
     with pytest.raises(ImportError, match="VLLM_GDN_DECODE_KERNEL=pla"):
         pla_loader.get_sail_cuda_pla_k_last()
+
+
+def test_shared_library_loader_failure_falls_back_only_for_auto(
+    pla_loader, modules, monkeypatch
+):
+    def unavailable(name):
+        raise OSError("PLA shared library ABI mismatch")
+
+    modules("pla.decode", __getattr__=unavailable)
+    assert pla_loader.get_sail_cuda_pla_k_last() is None
+    monkeypatch.setenv("VLLM_GDN_DECODE_KERNEL", "pla")
+    with pytest.raises(ImportError, match="ABI mismatch") as error:
+        pla_loader.get_sail_cuda_pla_k_last()
+    assert isinstance(error.value.__cause__, OSError)

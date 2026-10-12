@@ -95,6 +95,15 @@ def gdn_provider(modules, monkeypatch, upstream_source_root):
         "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn",
         QwenGatedDeltaNetAttention=Layer,
     )
+    originals = {
+        name: getattr(Layer, name)
+        for name in (
+            "__init__",
+            "_fused_gdn_decode_unsupported_reason",
+            "_can_use_fused_gdn_mtp_decode",
+        )
+    }
+    original_getters = env_module.environment_variables
     load_patch("vllm_sail/patch/enhancement/attention/gdn_decode.py")
     return NS(
         layer=Layer,
@@ -105,7 +114,44 @@ def gdn_provider(modules, monkeypatch, upstream_source_root):
         path=path,
         config=NS(state_dtype="fp32", model_config=NS(dtype="bf16")),
         provider=provider,
+        originals=originals,
+        original_getters=original_getters,
     )
+
+
+@pytest.mark.upstream_source
+@pytest.mark.parametrize(
+    "attribute",
+    [
+        "environment_variables",
+        "__init__",
+        "_fused_gdn_decode_unsupported_reason",
+        "_can_use_fused_gdn_mtp_decode",
+    ],
+)
+def test_decode_patches_record_originals_and_reject_reapplication(
+    gdn_provider, attribute
+):
+    from vllm_sail.patch.utils import PATCH_MARKER, patch
+
+    f = gdn_provider
+    if attribute == "environment_variables":
+        module, target = "vllm.envs", attribute
+        replacement, original = f.env.environment_variables, f.original_getters
+    else:
+        module = "vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn"
+        target = f"QwenGatedDeltaNetAttention.{attribute}"
+        replacement, original = getattr(f.layer, attribute), f.originals[attribute]
+    assert replacement is not original
+    assert getattr(replacement, PATCH_MARKER)[f"{module}.{target}"] is original
+    with pytest.raises(RuntimeError, match="already patched"):
+        patch(
+            module,
+            target,
+            reason="GDN lifecycle regression",
+            affected_versions=">=0.31.0,<0.32.0",
+            remove_when="upstream registers platform GDN backends",
+        )(lambda *a, **kw: None)
 
 
 @pytest.mark.upstream_source

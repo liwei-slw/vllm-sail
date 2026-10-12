@@ -30,6 +30,29 @@ def _run(argv: list[str], *, env: dict[str, str] | None = None) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_gdn_native_binding_guards_are_enabled_by_the_build(tmp_path):
+    """Preprocess shipped bindings with the target's actual build definitions."""
+    compiler = _tool("c++")
+    source = (ROOT / "CMakeLists.txt").read_text()
+    definitions = re.findall(
+        r"target_compile_definitions\(_upstream_C\s+PRIVATE\s+([^)]*)\)", source
+    )
+    flags = [f"-D{item}" for definition in definitions for item in definition.split()]
+    for filename in ("torch_bindings.cpp", "ops.h"):
+        unit = tmp_path / filename
+        body = (ROOT / "csrc/upstream/libtorch_stable" / filename).read_text()
+        unit.write_text(re.sub(r"^\s*#\s*include[^\n]*", "", body, flags=re.MULTILINE))
+        result = subprocess.run(
+            [compiler, "-E", "-P", "-x", "c++", *flags, str(unit)],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "fused_gdn_decode_post_conv_mtp" in result.stdout
+        if filename == "torch_bindings.cpp":
+            assert 'ops.impl("fused_gdn_decode_post_conv_mtp"' in result.stdout
+
+
 @pytest.mark.parametrize(
     ("environment", "settings", "expected"),
     [

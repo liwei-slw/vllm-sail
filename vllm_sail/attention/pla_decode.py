@@ -74,7 +74,7 @@ def _resolve_sail_cuda_pla() -> None:
                 fused_sigmoid_gating_delta_rule_forward_k_last,
                 fused_sigmoid_gating_delta_rule_forward_k_last_packed,
             )
-        except ImportError as exc:
+        except (ImportError, OSError) as exc:
             if envs.VLLM_GDN_DECODE_KERNEL == "auto":
                 logger.warning_once(
                     "PLA decode is unavailable; GDN auto will use another backend: %s",
@@ -83,7 +83,7 @@ def _resolve_sail_cuda_pla() -> None:
                 return
             raise ImportError(
                 "VLLM_GDN_DECODE_KERNEL=pla but the PPU `pla` decode package "
-                "is not installed. Install the PLA library or select "
+                f"cannot load: {exc}. Install a compatible PLA library or select "
                 "VLLM_GDN_DECODE_KERNEL=triton."
             ) from exc
 
