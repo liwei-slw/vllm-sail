@@ -8,6 +8,9 @@
 #include <hggc_bf16.h>
 #include <hggc_fp16.h>
 #include <hggc_runtime.h>
+#if defined(__HGGCCC__)
+#include <hggc_pipeline_primitives.h>
+#endif
 
 #include "../torch_utils.h"
 #include "../../cuda_compat.h"
@@ -18,8 +21,7 @@ template <typename StateT>
 __device__ __forceinline__ void cp_async_16b(StateT* smem_ptr,
                                              const StateT* gmem_ptr) {
 #if defined(__HGGCCC__)
-  *reinterpret_cast<int4*>(smem_ptr) =
-      *reinterpret_cast<const int4*>(gmem_ptr);
+  __pipeline_memcpy_async(smem_ptr, gmem_ptr, 16);
 #else
   const uint32_t smem_addr =
       static_cast<uint32_t>(__cvta_generic_to_shared(smem_ptr));
@@ -30,13 +32,18 @@ __device__ __forceinline__ void cp_async_16b(StateT* smem_ptr,
 }
 
 __device__ __forceinline__ void cp_async_commit() {
-#if !defined(__HGGCCC__)
+#if defined(__HGGCCC__)
+  __pipeline_commit();
+#else
   asm volatile("cp.async.commit_group;\n" ::);
 #endif
 }
 
 __device__ __forceinline__ void cp_async_wait_all() {
-#if !defined(__HGGCCC__)
+#if defined(__HGGCCC__)
+  __pipeline_commit();
+  __pipeline_wait_prior(0);
+#else
   asm volatile("cp.async.wait_all;\n" ::: "memory");
 #endif
 }
