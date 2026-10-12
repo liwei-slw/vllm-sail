@@ -24,7 +24,6 @@ ROOT = Path(__file__).resolve().parents[2]
     [
         ".github/workflows/_ppu-ops-tests.yaml",
         "scripts/ci/ppu_ops_environment.json",
-        "scripts/ci/ppu_ops_probe.py",
         "scripts/ci/ppu_ops_runner.py",
         "scripts/ci/ppu_ops_select.py",
         "scripts/ci/ppu_ops_test.sh",
@@ -36,6 +35,17 @@ ROOT = Path(__file__).resolve().parents[2]
 )
 def test_ops_asset_names(relative_path):
     assert (ROOT / relative_path).is_file(), relative_path
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        ".github/workflows/ppu-diagnostics.yaml",
+        "scripts/ci/ppu_ops_probe.py",
+    ],
+)
+def test_standalone_diagnostic_assets_are_removed(relative_path):
+    assert not (ROOT / relative_path).exists(), relative_path
 
 
 def test_ops_assets_have_no_legacy_namespace():
@@ -351,7 +361,6 @@ def test_summary_cli_rejects_extra_partial_artifact(
         "build-ppu-wheels.yaml",
         "e2e-ppu.yaml",
         "_ppu-ops-tests.yaml",
-        "ppu-diagnostics.yaml",
     ],
 )
 def test_device_workflows_have_no_chinese_text(filename):
@@ -693,18 +702,14 @@ def test_scheduler_forwards_test_index_without_changing_image():
     )
 
 
-@pytest.fixture(
-    params=[
-        ("_ppu-ops-tests.yaml", "ops-tests"),
-        ("ppu-diagnostics.yaml", "device-probe"),
-    ]
-)
-def worker_launch(request, tmp_path):
-    filename, job_id = request.param
-    workflow = yaml.safe_load((ROOT / ".github/workflows" / filename).read_text())
+@pytest.fixture
+def worker_launch(tmp_path):
+    workflow = yaml.safe_load(
+        (ROOT / ".github/workflows/_ppu-ops-tests.yaml").read_text()
+    )
     scheduler = next(
         s
-        for s in workflow["jobs"][job_id]["steps"]
+        for s in workflow["jobs"]["ops-tests"]["steps"]
         if "ppu-scheduler-action" in s.get("uses", "")
     )
     # Run the actual worker command and record exports at Python entry, without installing packages or using devices.

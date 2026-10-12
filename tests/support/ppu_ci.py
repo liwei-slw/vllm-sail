@@ -37,18 +37,7 @@ def write_report(path, report):
     temporary.replace(path)
 
 
-def observe_devices(torch):
-    """Sample independently so availability checks cannot hide the device count or errors from other queries."""
-    result = {}
-    for name in ("is_available", "device_count"):
-        try:
-            result[name] = {"value": getattr(torch.cuda, name)()}
-        except Exception as error:
-            result[name] = {"error": f"{type(error).__name__}: {error}"}
-    return result
-
-
-def inspect_runtime(isolated, checkout, requires, *, device_observation=None):
+def inspect_runtime(isolated, checkout, requires):
     isolated, checkout = Path(isolated).resolve(), Path(checkout).resolve()
     require(Path.cwd().resolve() == isolated, "cwd 不是隔离根目录")
     require(not isolated.is_relative_to(checkout), "隔离目录位于 checkout 内")
@@ -75,15 +64,10 @@ def inspect_runtime(isolated, checkout, requires, *, device_observation=None):
     )
     torch = modules["torch"]
     require(modules["vllm.platforms"].current_platform.is_ppu(), "不是 PPU 平台")
-    if device_observation is None:
-        single_device = torch.cuda.is_available() and torch.cuda.device_count() == 1
-    else:
-        device_observation.update(observe_devices(torch))
-        single_device = (
-            device_observation["is_available"].get("value") is True
-            and device_observation["device_count"].get("value") == 1
-        )
-    require(single_device, "需要一张可用 PPU")
+    require(
+        torch.cuda.is_available() and torch.cuda.device_count() == 1,
+        "需要一张可用 PPU",
+    )
     providers = modules["vllm_sail.native.extensions"].import_kernels(strict=True)
     return {
         "isolated_root": str(isolated),
