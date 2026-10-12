@@ -161,7 +161,8 @@ def test_runtime_expansion_preserves_other_board(runner):
     }
     effective = runner.effective_selection(config, original, b"original", "ppu10", True)
     assert effective["expanded_boards"] == ["ppu10"]
-    assert len(effective["groups"][0]["files"]) == 12
+    assert len(effective["groups"][0]["files"]) == 13
+    assert "tests/e2e/test_mxfp8_emulation.py" in effective["groups"][0]["files"]
     assert effective["groups"][1] == original["groups"][1]
     assert original["test_ids"] == ["kda"]
 
@@ -314,7 +315,7 @@ def test_full_inputs_need_no_confirmation(runner, valid_inputs, board):
     raw, _, config, environment, manifest = runner.read_inputs(valid_inputs)
     selection = json.loads(raw)
     assert selection["mode"] == "full"
-    assert len(selection["files"]) == len(config["test_catalog"]) == 14
+    assert len(selection["files"]) == len(config["test_catalog"]) == 15
     assert len(manifest["wheels"]) == 2
     assert environment["qualified"] is False
     assert environment_path.read_bytes() == original_environment
@@ -455,7 +456,7 @@ def test_selection_cli_with_verified_wheels(runner, valid_inputs, tmp_path):
         env={**os.environ, "GITHUB_OUTPUT": str(github_output)},
     )
     assert result.returncode == 0, result.stderr
-    assert len(json.loads(output.read_bytes())["files"]) == 14
+    assert len(json.loads(output.read_bytes())["files"]) == 15
     assert "has_tests=true" in github_output.read_text()
 
 

@@ -43,9 +43,9 @@ def test_real_config_and_full_routes(selector, config):
     result = selector.select_tests(config, ["csrc/unknown.cu"], **OPTIONS)
     assert result["mode"] == "full"
     assert "native_change" in result["reasons"]
-    assert len(result["test_ids"]) == 14
+    assert len(result["test_ids"]) == 15
     routes = selector.route_tests(config, result["test_ids"])
-    assert [len(g["files"]) for g in routes["groups"]] == [12, 13]
+    assert [len(g["files"]) for g in routes["groups"]] == [13, 14]
     assert routes["matrix"]["include"] == [
         {"group_id": b + "-0", "board": b, "nproc_per_node": 1}
         for b in ("ppu10", "ppu15")
@@ -209,6 +209,37 @@ def test_fp8_linear_requires_deepgemm_on_ppu15(selector, config):
     assert len(routes["groups"]) == 1
     assert routes["groups"][0]["board"] == "ppu15"
     assert routes["groups"][0]["files"] == ["tests/e2e/test_fp8_linear_dispatch.py"]
+
+
+@pytest.mark.parametrize(
+    "changed_path",
+    [
+        "tests/e2e/test_mxfp8_emulation.py",
+        "vllm_sail/model_executor/kernels/linear/mxfp8.py",
+    ],
+)
+def test_mxfp8_emulation_selected_on_both_boards(selector, config, changed_path):
+    result = selector.select_tests(config, [changed_path], **OPTIONS)
+    assert result["mode"] == "subset"
+    assert result["test_ids"] == ["mxfp8-emulation"]
+    item = next(t for t in config["test_catalog"] if t["id"] == "mxfp8-emulation")
+    assert item == {
+        "id": "mxfp8-emulation",
+        "test": "tests/e2e/test_mxfp8_emulation.py",
+        "boards": ["ppu10", "ppu15"],
+        "requires": ["torch", "triton", "vllm", "vllm_sail"],
+        "board_overrides": {},
+    }
+    routes = selector.route_tests(config, result["test_ids"])
+    assert routes["groups"] == [
+        {
+            "group_id": board + "-0",
+            "board": board,
+            "test_ids": ["mxfp8-emulation"],
+            "files": ["tests/e2e/test_mxfp8_emulation.py"],
+        }
+        for board in ("ppu10", "ppu15")
+    ]
 
 
 def test_routing_rejects_unknown_ids(selector, config):

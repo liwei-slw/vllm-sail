@@ -62,6 +62,11 @@
         "id": "mxfp4-prepare-python",
         "paths": ["vllm_sail/model_executor/layers/fused_moe/experts/deep_gemm_moe.py", "vllm_sail/model_executor/layers/quantization/utils/mxfp4_utils.py", "vllm_sail/patch/enhancement/fused_moe_ppu.py", "vllm_sail/patch/enhancement/mxfp4.py"],
         "test_ids": ["mxfp4-prepare"]
+      },
+      {
+        "id": "mxfp8-emulation-python",
+        "paths": ["vllm_sail/model_executor/kernels/linear/mxfp8.py"],
+        "test_ids": ["mxfp8-emulation"]
       }
     ]
   },
@@ -78,6 +83,7 @@
     {"id": "merge-mla", "test": "tests/e2e/tier_b/test_merge_and_mla.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "minimax", "test": "tests/e2e/tier_b/test_minimax_m3.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {"test_sparse_full_fp8_index": ["ppu15"]}},
     {"id": "mxfp4-prepare", "test": "tests/e2e/test_mxfp4_prepare.py", "boards": ["ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
+    {"id": "mxfp8-emulation", "test": "tests/e2e/test_mxfp8_emulation.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "norm-quant", "test": "tests/e2e/tier_b/test_norm_quant.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "selective-scan", "test": "tests/e2e/tier_b/test_selective_scan.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}}
   ],
