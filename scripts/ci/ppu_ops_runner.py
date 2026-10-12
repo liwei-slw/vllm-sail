@@ -510,8 +510,24 @@ def execute(env):
                 str(Path(env["WHEELS_DIR"]) / record["file"])
                 for record in manifest["wheels"].values()
             ]
+            child_env["PIP_CONSTRAINT"] = str(output / "image-constraints.txt")
+            stack_script = str(ROOT / "scripts/ci/ppu_image_stack.py")
+            stack_args = [
+                "--sdk",
+                "/usr/local/PPU_SDK",
+                "--output",
+                str(output / "image-stack.json"),
+            ]
             with (output / "install.log").open("w") as log:
                 for command in (
+                    [
+                        sys.executable,
+                        stack_script,
+                        "prepare",
+                        *stack_args,
+                        "--constraints",
+                        child_env["PIP_CONSTRAINT"],
+                    ],
                     [
                         sys.executable,
                         "-m",
@@ -533,6 +549,7 @@ def execute(env):
                         "-r",
                         str(ROOT / "requirements/dev.txt"),
                     ],
+                    [sys.executable, stack_script, "verify", *stack_args],
                 ):
                     subprocess.run(
                         command,

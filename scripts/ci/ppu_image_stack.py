@@ -5,7 +5,19 @@ import argparse
 import hashlib
 import importlib.metadata
 import json
+import os
+import subprocess
+import sys
+import tarfile
+import tempfile
+import urllib.request
 from pathlib import Path
+
+TORCH_OVERRIDE = {
+    "torch_archive_url": "https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/latest/PPU_SDK_PYPI/pytorch/ppu_sdk_hggcrt3-pytorch2.13.0-ubuntu2404-py312.tar.gz",
+    "torch_archive_sha256": "63e23fedca52f1039b2deac29aa37d7b88d8ba7413f9b5600d223ffb095ec1f7",
+    "torch_wheel_sha256": "24a95ab1e6bbc9d8dd61a4347020dd1975e7bdfb06e2110bbc618874a8675760",
+}
 
 PROTECTED_PACKAGES = (
     "torch",
@@ -96,25 +108,105 @@ def constraints_text(versions):
     )
 
 
+def copy_verified(source, destination, expected):
+    digest = hashlib.sha256()
+    with destination.open("wb") as target:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+            target.write(chunk)
+    if digest.hexdigest() != expected:
+        raise ValueError(
+            f"SHA256 mismatch for {destination.name}: {digest.hexdigest()}"
+        )
+
+
+def install_torch(sdk):
+    def preserved():
+        return {
+            "sdk_sha256": tree_digest(sdk),
+            "packages": {k: v for k, v in package_versions().items() if k != "torch"},
+        }
+
+    before = preserved()
+    with tempfile.TemporaryDirectory(prefix="ppu-torch-") as temporary:
+        archive = Path(temporary) / "torch.tar.gz"
+        print(
+            f"torch_archive_url={TORCH_OVERRIDE['torch_archive_url']}",
+            file=sys.stderr,
+            flush=True,
+        )
+        with urllib.request.urlopen(
+            TORCH_OVERRIDE["torch_archive_url"], timeout=90
+        ) as source:
+            copy_verified(source, archive, TORCH_OVERRIDE["torch_archive_sha256"])
+        with tarfile.open(archive, "r:gz") as source:
+            wheels = [
+                member
+                for member in source.getmembers()
+                if member.isfile()
+                and Path(member.name).name.startswith("torch-")
+                and member.name.endswith(".whl")
+            ]
+            if len(wheels) != 1:
+                raise ValueError(
+                    f"expected exactly one torch wheel, found {len(wheels)}"
+                )
+            wheel = Path(temporary) / Path(wheels[0].name).name
+            with source.extractfile(wheels[0]) as stream:
+                copy_verified(stream, wheel, TORCH_OVERRIDE["torch_wheel_sha256"])
+        env = dict(os.environ)
+        env.pop("PIP_CONSTRAINT", None)
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "--no-index",
+                "--no-deps",
+                "--force-reinstall",
+                str(wheel),
+            ],
+            env=env,
+            check=True,
+            stdout=sys.stderr,
+        )
+    verify_unchanged(before, preserved())
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("capture", "verify"))
+    parser.add_argument("command", choices=("prepare", "capture", "verify"))
     parser.add_argument("--sdk", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--constraints", type=Path)
     args = parser.parse_args()
+    capture = args.command in ("capture", "prepare")
+    if capture and args.constraints is None:
+        parser.error(f"{args.command} requires --constraints")
+    before = {} if capture else json.loads(args.output.read_text())
+    replaced = args.command == "prepare" or before.get("stack_source") == "image+torch"
+    if args.command == "prepare":
+        install_torch(args.sdk)
 
     import torch
 
+    if (
+        replaced
+        and not (
+            Path(torch.__file__).parent / ".ppu_compat/compatible_wrapper.h"
+        ).is_file()
+    ):
+        raise ValueError("prepared Torch is missing .ppu_compat/compatible_wrapper.h")
     observed = snapshot(
         args.sdk,
         Path(torch.__file__).parent,
         str(torch.__version__),
         package_versions(),
     )
-    if args.command == "capture":
-        if args.constraints is None:
-            parser.error("capture requires --constraints")
+    if replaced:
+        observed.update(stack_source="image+torch", **TORCH_OVERRIDE)
+    if capture:
         args.output.write_text(json.dumps(observed, sort_keys=True, indent=2) + "\n")
         args.constraints.write_text(constraints_text(observed["packages"]))
         for key in (
@@ -125,8 +217,11 @@ def main():
             "torch_version",
         ):
             print(f"{key}={observed[key]}")
+        if replaced:
+            for key, value in TORCH_OVERRIDE.items():
+                print(f"{key}={value}")
     else:
-        verify_unchanged(json.loads(args.output.read_text()), observed)
+        verify_unchanged(before, observed)
         print("stack_unchanged=true")
 
 

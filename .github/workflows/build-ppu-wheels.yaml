@@ -10,7 +10,7 @@ on:
         default: ""
         type: string
       build_image:
-        description: Digest-pinned image supplying the SDK and PyTorch for wheel builds
+        description: Digest-pinned SDK image; CI installs the checksum-pinned SAIL Torch
         required: false
         default: reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb
         type: string

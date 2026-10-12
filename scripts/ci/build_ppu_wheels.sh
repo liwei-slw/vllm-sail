@@ -69,7 +69,7 @@ done
 PYTHON_VERSION="$(python -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')"
 [[ "${PYTHON_VERSION}" == "3.12" ]] || fail "the selected image requires Python 3.12"
 {
-    printf 'status=running\nstack_source=image\n'
+    printf 'status=running\n'
     printf 'vllm_ref=%s\n' "${VLLM_REF}"
     printf 'pytorch_sail_arch=%s\n' "${PYTORCH_SAIL_ARCH}"
     printf 'build_image=%s\n' "${VLLM_SAIL_BUILD_IMAGE:-}"
@@ -98,6 +98,9 @@ export PIP_CONSTRAINT="${WORK_DIR}/image-constraints.txt"
 
 command -v hgcc
 "${HGCC}" --version 2>&1 | tee "${LOG_DIR}/hgcc-version.log"
+python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" prepare \
+    --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" \
+    --constraints "${PIP_CONSTRAINT}" | tee -a "${MANIFEST}"
 python - <<'PY' 2>&1 | tee "${LOG_DIR}/torch-env.log"
 from pathlib import Path
 import torch
@@ -105,11 +108,8 @@ import torch
 print(torch.__version__)
 print(torch.__file__)
 if not (Path(torch.__file__).parent / ".ppu_compat/compatible_wrapper.h").is_file():
-    raise SystemExit("the image must contain a SAIL PyTorch build with PPU headers")
+    raise SystemExit("prepared SAIL PyTorch must contain PPU headers")
 PY
-python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
-    --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" \
-    --constraints "${PIP_CONSTRAINT}" | tee -a "${MANIFEST}"
 
 VLLM_SRC="${WORK_DIR}/vllm"
 git init "${VLLM_SRC}"

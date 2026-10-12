@@ -461,7 +461,8 @@ def test_selection_cli_with_verified_wheels(runner, valid_inputs, tmp_path):
 
 @pytest.mark.parametrize("pip_index", [None, "", "https://packages.example/simple/"])
 @pytest.mark.parametrize(
-    "failure", [None, "install", "pytest", "preflight", "missing-report"]
+    "failure",
+    [None, "torch", "stack", "install", "pytest", "preflight", "missing-report"],
 )
 def test_execute_only_publishes_success_after_complete_evidence(
     runner, valid_inputs, tmp_path, monkeypatch, failure, pip_index
@@ -529,9 +530,32 @@ def test_execute_only_publishes_success_after_complete_evidence(
     monkeypatch.setattr(runner, "clean_environment", child_environment)
     original_run = subprocess.run
     installed = []
+    stack_commands = []
 
     def device_boundary(command, **kwargs):
+        if command[1].endswith("ppu_image_stack.py"):
+            stack_commands.append(command[2])
+            assert command[3:7] == [
+                "--sdk",
+                "/usr/local/PPU_SDK",
+                "--output",
+                str(output / "image-stack.json"),
+            ]
+            if command[2] == "prepare":
+                assert not installed
+                assert command[7:] == ["--constraints", kwargs["env"]["PIP_CONSTRAINT"]]
+                if failure == "torch":
+                    raise subprocess.CalledProcessError(1, command)
+            elif command[2] == "verify":
+                assert len(installed) == 2
+                if failure == "stack":
+                    raise subprocess.CalledProcessError(1, command)
+            return subprocess.CompletedProcess(command, 0)
         if command[1:3] == ["-m", "pip"]:
+            assert stack_commands == ["prepare"]
+            assert kwargs["env"]["PIP_CONSTRAINT"] == str(
+                output / "image-constraints.txt"
+            )
             installed.append(command)
             if failure == "install" and "-r" in command:
                 raise subprocess.CalledProcessError(1, command)
@@ -562,6 +586,14 @@ def test_execute_only_publishes_success_after_complete_evidence(
     summary = json.loads((output / "summary.json").read_bytes())
     assert code == (0 if failure is None else 1)
     assert summary["status"] == ("success" if failure is None else "failure")
+    assert stack_commands == (
+        ["prepare"] if failure in {"torch", "install"} else ["prepare", "verify"]
+    )
+    if failure == "torch":
+        assert not installed
+        assert summary["failure_stage"] == "install"
+        assert not (output / "preflight.log").exists()
+        return
     assert "--no-deps" in installed[0] and "--force-reinstall" in installed[0]
     assert len(installed[0][installed[0].index("--force-reinstall") + 1 :]) == 2
     assert installed[1] == [
@@ -574,16 +606,18 @@ def test_execute_only_publishes_success_after_complete_evidence(
         "-r",
         str(repo / "requirements/dev.txt"),
     ]
-    assert len(installed) == 2  # No device-library installs or upgrades.
-    if failure not in {"preflight", "install"}:
+    assert len(installed) == 2
+    if failure not in {"preflight", "install", "stack"}:
         assert (
             json.loads((output / "nodes/second.json").read_bytes())["status"]
             == "success"
         )
     else:
-        assert summary["failure_stage"] == failure
+        assert summary["failure_stage"] == (
+            "install" if failure == "stack" else failure
+        )
         assert not (output / "nodes").exists()
-        if failure == "install":
+        if failure in {"install", "stack"}:
             assert not (output / "preflight.log").exists()
 
 

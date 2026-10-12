@@ -28,7 +28,7 @@ def test_build_script_preserves_required_build_contract() -> None:
     required = (
         "set -Eeuo pipefail",
         "ppu_image_stack.py",
-        "stack_source=image",
+        "status=running",
         'export PIP_CONSTRAINT="${WORK_DIR}/image-constraints.txt"',
         ".github/vllm-main-verified.commit",
         "unset TORCH_CUDA_ARCH_LIST",
@@ -184,7 +184,7 @@ def test_rust_build_is_explicit_before_wheel_packaging() -> None:
     assert "vllm-rust-build.log" in text
 
 
-def test_image_build_never_downloads_or_replaces_sdk_and_torch():
+def test_image_build_only_replaces_torch_before_capturing_the_stack():
     text = SCRIPT.read_text()
     for forbidden in (
         "SDK_URL",
@@ -196,9 +196,10 @@ def test_image_build_never_downloads_or_replaces_sdk_and_torch():
         "download()",
     ):
         assert forbidden not in text
-    capture = text.index('ppu_image_stack.py" capture')
+    prepare = text.index('ppu_image_stack.py" prepare')
     verify = text.index('ppu_image_stack.py" verify')
-    assert capture < text.index("python -m pip install") < verify
+    assert prepare < text.index("compatible_wrapper.h")
+    assert prepare < text.index("python -m pip install") < verify
     assert verify < text.index("status=succeeded")
 
 
@@ -380,3 +381,201 @@ def test_image_stack_cli_capture_verify_and_refuse_mutation(tmp_path):
     refused = run("verify")
     assert refused.returncode != 0
     assert "image stack changed: sdk_sha256" in refused.stderr
+
+
+def test_torch_override_is_content_pinned(image_stack):
+    assert image_stack.TORCH_OVERRIDE == {
+        "torch_archive_url": "https://art-pub.eng.t-head.cn/artifactory/apackage/daily/ppu.2v2_release/latest/PPU_SDK_PYPI/pytorch/ppu_sdk_hggcrt3-pytorch2.13.0-ubuntu2404-py312.tar.gz",
+        "torch_archive_sha256": "63e23fedca52f1039b2deac29aa37d7b88d8ba7413f9b5600d223ffb095ec1f7",
+        "torch_wheel_sha256": "24a95ab1e6bbc9d8dd61a4347020dd1975e7bdfb06e2110bbc618874a8675760",
+    }
+
+
+@pytest.fixture
+def torch_archive(image_stack, tmp_path, monkeypatch):
+    import hashlib
+    import io
+    import tarfile
+
+    archive = tmp_path / "torch.tar.gz"
+    wheel_data = b"verified torch wheel"
+
+    def create(names):
+        with tarfile.open(archive, "w:gz") as target:
+            for name in names:
+                info = tarfile.TarInfo(name)
+                info.size = len(wheel_data)
+                target.addfile(info, io.BytesIO(wheel_data))
+        monkeypatch.setattr(
+            image_stack,
+            "TORCH_OVERRIDE",
+            {
+                "torch_archive_url": archive.as_uri(),
+                "torch_archive_sha256": hashlib.sha256(
+                    archive.read_bytes()
+                ).hexdigest(),
+                "torch_wheel_sha256": hashlib.sha256(wheel_data).hexdigest(),
+            },
+            raising=False,
+        )
+        return archive
+
+    create(
+        [
+            "package/torch-2.13.0-cp312-cp312-linux_x86_64.whl",
+            "package/torchvision-0.28.0-cp312-cp312-linux_x86_64.whl",
+        ]
+    )
+    return create
+
+
+def test_prepare_installs_only_verified_torch_and_keeps_other_packages(
+    image_stack, stack_trees, torch_archive, monkeypatch
+):
+    sdk, _ = stack_trees
+    versions = {"torch": "2.13.0", "triton": "3.7.0", "torchvision": "0.28.0"}
+    monkeypatch.setattr(image_stack, "package_versions", lambda: versions)
+    monkeypatch.setenv("PIP_CONSTRAINT", "/not-yet-created/constraints.txt")
+    commands = []
+
+    def install(command, **kwargs):
+        commands.append(command)
+        assert command[:-1] == [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--no-index",
+            "--no-deps",
+            "--force-reinstall",
+        ]
+        assert Path(command[-1]).name == "torch-2.13.0-cp312-cp312-linux_x86_64.whl"
+        assert Path(command[-1]).read_bytes() == b"verified torch wheel"
+        assert "PIP_CONSTRAINT" not in kwargs["env"]
+        assert kwargs["check"] is True
+
+    monkeypatch.setattr(subprocess, "run", install)
+    before = image_stack.tree_digest(sdk)
+    image_stack.install_torch(sdk)
+    assert len(commands) == 1
+    assert image_stack.tree_digest(sdk) == before
+
+
+@pytest.mark.parametrize("damage", ["archive", "wheel", "missing", "duplicate"])
+def test_prepare_rejects_invalid_torch_before_pip(
+    image_stack, stack_trees, torch_archive, monkeypatch, damage
+):
+    if damage in ("archive", "wheel"):
+        image_stack.TORCH_OVERRIDE[f"torch_{damage}_sha256"] = "0" * 64
+    elif damage == "missing":
+        torch_archive(["package/torchvision-0.28.0-cp312-cp312-linux_x86_64.whl"])
+    else:
+        torch_archive(
+            [
+                "first/torch-2.13.0-cp312-cp312-linux_x86_64.whl",
+                "second/torch-2.13.0-cp312-cp312-linux_x86_64.whl",
+            ]
+        )
+    monkeypatch.setattr(image_stack, "package_versions", lambda: {})
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("unverified packages must not be installed"),
+    )
+    with pytest.raises(ValueError, match="SHA256|exactly one"):
+        image_stack.install_torch(stack_trees[0])
+
+
+@pytest.mark.parametrize("damage", ["sdk", "packages"])
+def test_prepare_rejects_changes_outside_torch(
+    image_stack, stack_trees, torch_archive, monkeypatch, damage
+):
+    sdk, _ = stack_trees
+    versions = {"torch": "2.13.0", "triton": "3.7.0"}
+    monkeypatch.setattr(image_stack, "package_versions", lambda: dict(versions))
+
+    def install(*args, **kwargs):
+        if damage == "sdk":
+            (sdk / "hgcc").write_bytes(b"changed")
+        else:
+            versions["triton"] = "different"
+
+    monkeypatch.setattr(subprocess, "run", install)
+    with pytest.raises(ValueError, match="image stack changed"):
+        image_stack.install_torch(sdk)
+
+
+@pytest.mark.parametrize("header", [True, False])
+def test_prepare_records_replacement_provenance_and_checks_header(
+    image_stack, stack_trees, torch_archive, tmp_path, monkeypatch, header, capsys
+):
+    from types import SimpleNamespace
+
+    original_run = subprocess.run
+    sdk, torch_root = stack_trees
+    if header:
+        (torch_root / ".ppu_compat").mkdir()
+        (torch_root / ".ppu_compat/compatible_wrapper.h").write_text("header")
+    output = tmp_path / "stack.json"
+    constraints = tmp_path / "constraints.txt"
+    monkeypatch.delitem(sys.modules, "torch", raising=False)
+    monkeypatch.setattr(image_stack, "package_versions", lambda: {"torch": "2.13.0"})
+
+    def install(*args, **kwargs):
+        assert "torch" not in sys.modules
+        print("pip installation progress", file=kwargs.get("stdout"))
+        monkeypatch.setitem(
+            sys.modules,
+            "torch",
+            SimpleNamespace(
+                __file__=str(torch_root / "__init__.py"), __version__="2.13.0"
+            ),
+        )
+
+    monkeypatch.setattr(subprocess, "run", install)
+    argv = ["stack", "prepare", "--sdk", str(sdk), "--output", str(output)]
+    monkeypatch.setattr(sys, "argv", [*argv, "--constraints", str(constraints)])
+    if not header:
+        with pytest.raises(ValueError, match="compatible_wrapper.h"):
+            image_stack.main()
+        assert not output.exists()
+        return
+    image_stack.main()
+    captured = capsys.readouterr()
+    from scripts.ci.ppu_ops_select import read_diagnostics
+
+    manifest = tmp_path / "build-manifest.txt"
+    text = SCRIPT.read_text()
+    start = text.index("{\n    printf 'status=running")
+    end = text.index('} >>"${MANIFEST}"', start) + len('} >>"${MANIFEST}"')
+    original_run(
+        ["bash", "-c", text[start:end]],
+        env={
+            **os.environ,
+            "MANIFEST": str(manifest),
+            "VLLM_REF": "a" * 40,
+            "PYTORCH_SAIL_ARCH": "ppu_15;ppu_10",
+        },
+        check=True,
+    )
+    manifest.write_text(manifest.read_text() + captured.out)
+    assert read_diagnostics(manifest)["stack_source"] == "image+torch"
+    observed = json.loads(output.read_text())
+    assert observed["stack_source"] == "image+torch"
+    assert all(observed[k] == v for k, v in image_stack.TORCH_OVERRIDE.items())
+    assert "torch===2.13.0" in constraints.read_text()
+    monkeypatch.setattr(sys, "argv", ["stack", "verify", *argv[2:]])
+    image_stack.main()
+    (torch_root / "_C.so").write_bytes(b"modified after preparation")
+    with pytest.raises(ValueError, match="torch_sha256"):
+        image_stack.main()
+
+
+@pytest.mark.parametrize("script", ["ppu_pin_ut.sh", "ppu_e2e_smoke.sh"])
+def test_runtime_scripts_prepare_same_torch_before_installing_wheels(script):
+    text = (ROOT / "scripts/ci" / script).read_text()
+    prepare = text.index('ppu_image_stack.py" prepare')
+    install = text.index("python -m pip install")
+    verify = text.index('ppu_image_stack.py" verify')
+    assert prepare < install < verify
+    assert "--constraints" in text[prepare:install]
