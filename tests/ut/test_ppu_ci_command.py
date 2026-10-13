@@ -36,8 +36,12 @@ class FakeGitHub:
             "draft": False,
             "user": {"login": "author"},
             "labels": [{"name": "ready"}],
-            "head": {"sha": HEAD, "ref": "main", "repo": {"full_name": "author/fork"}},
-            "base": {"sha": BASE, "ref": "main", "repo": {"full_name": REPO}},
+            "head": {
+                "sha": HEAD,
+                "ref": "main",
+                "repo": {"id": 1, "full_name": "author/fork"},
+            },
+            "base": {"sha": BASE, "ref": "main", "repo": {"id": 2, "full_name": REPO}},
         }
         self.comment = {
             "id": 17,
@@ -317,6 +321,35 @@ def test_rejected_event_never_dispatches(controller, api, context, mutation):
     assert not api.dispatches and not api.checks
 
 
+@pytest.mark.parametrize("side", ["head", "base"])
+def test_stable_pr_ignores_repository_metadata(controller, api, context, side):
+    original = copy.deepcopy(api.pr)
+    api.pr[side]["repo"]["pushed_at"] = "2026-10-13T08:00:00Z"
+    assert controller.stable_pr(api, original, "author", context) == api.pr
+
+
+@pytest.mark.parametrize("side", ["head", "base"])
+@pytest.mark.parametrize("field", ["sha", "ref", "repository", "repository_id"])
+def test_stable_pr_rejects_identity_changes(controller, api, context, side, field):
+    api.pr[side]["repo"]["id"] = 100
+    original = copy.deepcopy(api.pr)
+    if field == "repository":
+        api.pr[side]["repo"]["full_name"] = "other/repo"
+    elif field == "repository_id":
+        api.pr[side]["repo"]["id"] = 101
+    else:
+        api.pr[side][field] = "d" * 40 if field == "sha" else "other-branch"
+    with pytest.raises(controller.Rejected, match="head or base changed"):
+        controller.stable_pr(api, original, "author", context)
+
+
+def test_stable_pr_rechecks_authorization(controller, api, context):
+    original = copy.deepcopy(api.pr)
+    api.pr["labels"] = []
+    with pytest.raises(controller.Rejected):
+        controller.stable_pr(api, original, "author", context)
+
+
 def test_allow_stale_runs_but_warns(controller, api, context):
     api.behind = 2
     api.comment["body"] = "/ci run --allow-stale"
@@ -420,6 +453,109 @@ def test_retry_and_cancel_only_touch_bound_execution(controller, api, context):
     api.comment.update(id=19, body="/ci cancel")
     controller.handle_event(event(api), api, context)
     assert api.cancellations == [200]
+
+
+@pytest.mark.parametrize("code", [400, 401, 403, 404, 409, 422, 429])
+def test_rejected_retry_write_can_be_retried(
+    controller, api, context, monkeypatch, code
+):
+    from urllib.error import HTTPError
+
+    request = launch(controller, api, context)
+    run = executor(api, request)
+    run.update(status="completed", conclusion="failure")
+    original_post = api.post
+
+    def reject(path, payload=None):
+        if path.endswith("/rerun-failed-jobs"):
+            raise HTTPError("https://api.github.com", code, "rejected", {}, None)
+        return original_post(path, payload)
+
+    monkeypatch.setattr(api, "post", reject)
+    api.comment.update(id=18, body="/ci retry")
+    controller.handle_event(event(api), api, context)
+    record = json.loads(api.checks[request["id"]]["output"]["summary"])
+    assert record["min_attempt"] == 1
+    assert all(c["status"] == "completed" for c in api.checks.values())
+    assert all(c["conclusion"] == "failure" for c in api.checks.values())
+    assert "not accepted" in api.messages[-1]["body"]
+    monkeypatch.setattr(api, "post", original_post)
+    api.comment["id"] = 19
+    controller.handle_event(event(api), api, context)
+    assert api.retries == [200]
+
+
+@pytest.mark.parametrize("failure_step", ["record", "check"])
+def test_retry_preparation_failure_does_not_wedge_request(
+    controller, api, context, monkeypatch, failure_step
+):
+    request = launch(controller, api, context)
+    executor(api, request).update(status="completed", conclusion="failure")
+    original_patch = api.patch
+    failed = []
+    target = request["id"] if failure_step == "record" else request["id"] + 1
+
+    def fail_once(path, payload):
+        if path == f"check-runs/{target}" and not failed:
+            failed.append(path)
+            original_patch(path, payload)
+            raise OSError("check response lost before rerun was sent")
+        return original_patch(path, payload)
+
+    monkeypatch.setattr(api, "patch", fail_once)
+    api.comment.update(id=18, body="/ci retry")
+    controller.handle_event(event(api), api, context)
+    assert not api.retries
+    record = json.loads(api.checks[request["id"]]["output"]["summary"])
+    assert record["min_attempt"] == 1
+    api.comment["id"] = 19
+    controller.handle_event(event(api), api, context)
+    assert api.retries == [200]
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+@pytest.mark.parametrize("error_kind", ["connection", "http408", "http503"])
+def test_uncertain_retry_write_reconciles_without_duplicate(
+    controller, api, context, monkeypatch, accepted, error_kind
+):
+    from urllib.error import HTTPError
+
+    request = launch(controller, api, context)
+    run = executor(api, request)
+    run.update(status="completed", conclusion="failure")
+    original_post = api.post
+    writes = []
+
+    def lose_response(path, payload=None):
+        if path.endswith("/rerun-failed-jobs"):
+            writes.append(path)
+            if accepted:
+                original_post(path, payload)
+                run.update(run_attempt=2, status="in_progress", conclusion=None)
+            if error_kind.startswith("http"):
+                raise HTTPError(
+                    "https://api.github.com", int(error_kind[4:]), "uncertain", {}, None
+                )
+            raise OSError("rerun response lost")
+        return original_post(path, payload)
+
+    monkeypatch.setattr(api, "post", lose_response)
+    api.comment.update(id=18, body="/ci retry")
+    controller.handle_event(event(api), api, context)
+    record = json.loads(api.checks[request["id"]]["output"]["summary"])
+    assert record["min_attempt"] == 2
+    assert all(c["status"] == "queued" for c in api.checks.values())
+    assert ("confirmed" if accepted else "uncertain") in api.messages[-1]["body"]
+    api.comment["id"] = 19
+    controller.handle_event(event(api), api, context)
+    assert len(writes) == 1
+    if not accepted:
+        assert "inspect" in api.messages[-1]["body"]
+    run.update(run_attempt=2, status="completed", conclusion="failure")
+    monkeypatch.setattr(api, "post", original_post)
+    api.comment["id"] = 20
+    controller.handle_event(event(api), api, context)
+    assert api.retries == ([200, 200] if accepted else [200])
 
 
 def test_http_transport_accepts_compare_and_never_retries_writes(monkeypatch):

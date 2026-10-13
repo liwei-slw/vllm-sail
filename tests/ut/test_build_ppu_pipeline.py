@@ -802,13 +802,51 @@ def test_pr_test_jobs_disable_cache_and_checkout_bound_sha(name):
         checkout = next(s for s in steps if s.get("uses") == "actions/checkout@v4")
         assert checkout["with"]["ref"] == "${{ inputs.pr_head_sha || github.sha }}"
         assert checkout["with"]["persist-credentials"] is False
-        assert any("ACTIONS_CACHE_MODE" in s.get("run", "") for s in steps)
+        guard = next(
+            s for s in steps if s.get("name") == "Require disabled cache access"
+        )
+        assert guard.get("uses") == "actions/github-script@v7"
+        assert "ACTIONS_CACHE_MODE" in guard["with"]["script"]
+        assert steps.index(guard) < steps.index(checkout)
+        assert "ACTIONS_CACHE_MODE" not in workflow.get("env", {})
+        assert "ACTIONS_CACHE_MODE" not in workflow["jobs"][job_id].get("env", {})
+        assert "env" not in guard
         assert any("git rev-parse HEAD" in s.get("run", "") for s in steps)
     text = (WORKFLOW.parent / name).read_text()
     assert "secrets: inherit" not in text and "actions/cache" not in text
     if name != "build-ppu-wheels.yaml":
         assert "inputs.pr_mode" in text
         assert "EXPECTED_SAIL_SHA" in text
+
+
+@pytest.mark.parametrize(
+    "filename,job_id",
+    [
+        ("build-ppu-wheels.yaml", "build"),
+        ("ppu-pin-ut.yaml", "pin-unit-tests"),
+        ("e2e-ppu.yaml", "prepare"),
+        ("e2e-ppu.yaml", "e2e"),
+    ],
+)
+@pytest.mark.parametrize("mode", [None, "", "read", "write", "none"])
+def test_cache_guard_checks_runner_injected_node_environment(filename, job_id, mode):
+    steps = load_workflow(filename)["jobs"][job_id]["steps"]
+    guard = next(s for s in steps if s.get("name") == "Require disabled cache access")
+    assert guard.get("uses") == "actions/github-script@v7"
+    env = {k: v for k, v in os.environ.items() if k != "ACTIONS_CACHE_MODE"}
+    if mode is not None:
+        env["ACTIONS_CACHE_MODE"] = mode
+    result = subprocess.run(
+        ["node", "-e", guard["with"]["script"]],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) == (mode == "none"), result.stderr
+    if mode == "none":
+        assert "Cache access verified: none" in result.stdout
+    else:
+        assert "Actions cache access must be disabled" in result.stderr
 
 
 @pytest.mark.parametrize("filename", ["ppu-pin-ut.yaml", "e2e-ppu.yaml"])

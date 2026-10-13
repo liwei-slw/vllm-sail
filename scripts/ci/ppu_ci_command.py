@@ -7,6 +7,7 @@ import json
 import os
 import re
 import sys
+from urllib.error import HTTPError
 from urllib.parse import quote
 
 from scripts.ci.ppu_ci_common import (
@@ -118,7 +119,14 @@ def save_record(api, check, record, **updates):
 def stable_pr(api, pr, actor, context):
     current = api.get(f"pulls/{pr['number']}")
     require(
-        current["head"] == pr["head"] and current["base"] == pr["base"],
+        all(
+            all(current[side][key] == pr[side][key] for key in ("sha", "ref"))
+            and all(
+                current[side]["repo"][key] == pr[side]["repo"][key]
+                for key in ("id", "full_name")
+            )
+            for side in ("head", "base")
+        ),
         "PR head or base changed. Please send the command again.",
     )
     authorize(api, current, actor, context["trusted_users"])
@@ -300,17 +308,72 @@ def retry_or_cancel(api, pr, comment, context, command):
         in {"failure", "cancelled", "timed_out", "action_required", "startup_failure"},
         f"No completed failed execution to retry: {run_url(api, run['id'])}",
     )
-    require(run["run_attempt"] >= record["min_attempt"], "A retry is already queued.")
-    record["min_attempt"] = run["run_attempt"] + 1
-    record["run_id"] = run["id"]
-    record["cancelled"] = False
-    record["retry_actor"] = comment["user"]["login"]
-    record.setdefault("handled_comments", []).append(comment["id"])
-    save_record(api, check, record, status="queued")
-    for status in bound_checks(api, check, record):
-        api.patch(f"check-runs/{status['id']}", {"status": "queued"})
-    api.post(f"actions/runs/{run['id']}/rerun-failed-jobs")
-    reply(api, pr["number"], f"Failed jobs queued for retry: {run_url(api, run['id'])}")
+    link = run_url(api, run["id"])
+    require(
+        run["run_attempt"] >= record["min_attempt"],
+        f"A retry is pending or uncertain; a maintainer must inspect {link} before retrying. "
+        "If no rerun was accepted, use `/ci cancel` and then a new `/ci run`.",
+    )
+    statuses = bound_checks(api, check, record)
+    pending = {
+        **record,
+        "min_attempt": run["run_attempt"] + 1,
+        "run_id": run["id"],
+        "cancelled": False,
+        "retry_actor": comment["user"]["login"],
+        "handled_comments": [*record.get("handled_comments", []), comment["id"]],
+    }
+    sent = False
+    try:
+        save_record(api, check, pending, status="queued")
+        for status in statuses:
+            api.patch(f"check-runs/{status['id']}", {"status": "queued"})
+        sent = True
+        api.post(f"actions/runs/{run['id']}/rerun-failed-jobs")
+    except OSError as error:
+        # 未发送或被明确拒绝时才回滚；超时和服务端错误不能证明写入未生效。
+        rejected = isinstance(error, HTTPError) and error.code in {
+            400,
+            401,
+            403,
+            404,
+            409,
+            422,
+            429,
+        }
+        if not sent or rejected:
+            record["handled_comments"] = pending["handled_comments"]
+            save_record(api, check, record, status="completed", conclusion="failure")
+            for status in statuses:
+                api.patch(
+                    f"check-runs/{status['id']}",
+                    {"status": "completed", "conclusion": "failure"},
+                )
+            reply(
+                api,
+                pr["number"],
+                f"Retry was not accepted; post a new `/ci retry` after resolving the API failure. {link}",
+            )
+            return
+        try:
+            observed = api.get(f"actions/runs/{run['id']}")
+        except OSError:
+            observed = None
+        if observed is not None:
+            execution_identity(api, observed, check, pending)
+            if observed["run_attempt"] >= pending["min_attempt"]:
+                reply(
+                    api, pr["number"], f"Retry confirmed after a lost response: {link}"
+                )
+                return
+        reply(
+            api,
+            pr["number"],
+            f"Retry acceptance is uncertain; checks remain queued. A maintainer must inspect {link}. "
+            "If no rerun was accepted, use `/ci cancel` and then a new `/ci run`; do not blindly retry.",
+        )
+        return
+    reply(api, pr["number"], f"Failed jobs queued for retry: {link}")
 
 
 def handle_event(event, api, context):

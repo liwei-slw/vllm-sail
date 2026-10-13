@@ -18,7 +18,8 @@ python -m pytest tests/ut -q
 
 The package is imported directly from the checkout for these tests. The expected
 `vllm_sail._version is missing` warning can appear before the package is installed.
-Optional integration tests skip when their dependencies are unavailable.
+Optional integration tests skip when their dependencies are unavailable. Node.js
+is also needed to test the JavaScript guards embedded in the CI workflows.
 
 For native compilation or device testing, use the separate
 [PPU installation instructions](docs/getting_started/installation.md).
@@ -123,6 +124,11 @@ are never bypassed. The rollout still retains automatic PPU triggering for now.
 Commands are serialized per PR. A duplicate or active request returns its link.
 If dispatch acceptance is uncertain, checks remain queued: ask a maintainer to
 inspect the linked controller/executor run instead of repeatedly dispatching.
+A rejected retry or a failure before sending it restores a failed request so a
+new `/ci retry` can recover. A lost retry response is reconciled against the
+run's attempt number; if acceptance is still uncertain, no duplicate retry is
+sent. After a maintainer confirms that no rerun was accepted, `/ci cancel`
+invalidates the pending request and a new `/ci run` can start fresh.
 Cancellation invalidates the request before asking Actions to stop it. Missing,
 skipped, cancelled or timed-out required jobs cannot pass the gate. Reporter
 failures leave the gate non-successful; inspect the `PPU CI report` run and rerun
@@ -138,9 +144,11 @@ permissions. If policy blocks them, ask the organization maintainer to resolve i
 do not substitute a personal token or weaken branch protection.
 
 PPU workflows explicitly use GitHub's `cache-mode: none`, propagated through the
-reusable chain and enforced by scoped cache tokens. Jobs verify the effective
-`ACTIONS_CACHE_MODE` before executing PR code. This prevents default-branch cache
-writes from dispatch-based PR execution. Test jobs have read-only repository and
+reusable chain and enforced by scoped cache tokens. Before checking out PR code,
+jobs verify the effective `ACTIONS_CACHE_MODE` inside a Node Action: the runner
+injects this variable into Node Actions, not ordinary shell steps. Never set it
+to a constant to satisfy the guard. This prevents default-branch cache writes
+from dispatch-based PR execution. Test jobs have read-only repository and
 Actions permissions, no inherited secrets and no persisted checkout credentials.
 
 Before retiring the automatic PPU trigger in a separate PR, verify on GitHub:

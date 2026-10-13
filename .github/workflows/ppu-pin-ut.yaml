@@ -62,8 +62,13 @@ jobs:
           git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
 
       - name: Require disabled cache access
-        shell: bash
-        run: test "${ACTIONS_CACHE_MODE:-}" = none
+        uses: actions/github-script@v7
+        with:
+          script: |
+            if (process.env.ACTIONS_CACHE_MODE !== 'none') {
+              throw new Error('Actions cache access must be disabled');
+            }
+            console.log('Cache access verified: none');
 
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
