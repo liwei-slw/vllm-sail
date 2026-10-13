@@ -103,7 +103,7 @@ jobs:
         shell: bash
         env:
           EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
+        run: test "$(git -c "safe.directory=$(pwd -P)" rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
 
       - name: Select models
         id: select
@@ -164,7 +164,7 @@ jobs:
         shell: bash
         env:
           EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
+        run: test "$(git -c "safe.directory=$(pwd -P)" rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
 
       - name: Download CI-built wheels
         uses: actions/download-artifact@v4

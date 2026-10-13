@@ -115,7 +115,7 @@ jobs:
         shell: bash
         env:
           EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
-        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
+        run: test "$(git -c "safe.directory=$(pwd -P)" rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
 
       - name: Record build image for downstream tests
         id: image

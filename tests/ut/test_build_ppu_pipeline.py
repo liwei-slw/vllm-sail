@@ -811,7 +811,11 @@ def test_pr_test_jobs_disable_cache_and_checkout_bound_sha(name):
         assert "ACTIONS_CACHE_MODE" not in workflow.get("env", {})
         assert "ACTIONS_CACHE_MODE" not in workflow["jobs"][job_id].get("env", {})
         assert "env" not in guard
-        assert any("git rev-parse HEAD" in s.get("run", "") for s in steps)
+        revision = next(
+            s for s in steps if s.get("name") == "Verify the checked-out revision"
+        )
+        assert "rev-parse HEAD" in revision["run"]
+        assert steps.index(revision) == steps.index(checkout) + 1
     text = (WORKFLOW.parent / name).read_text()
     assert "secrets: inherit" not in text and "actions/cache" not in text
     if name != "build-ppu-wheels.yaml":
@@ -847,6 +851,70 @@ def test_cache_guard_checks_runner_injected_node_environment(filename, job_id, m
         assert "Cache access verified: none" in result.stdout
     else:
         assert "Actions cache access must be disabled" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "filename,job_id",
+    [
+        ("build-ppu-wheels.yaml", "build"),
+        ("ppu-pin-ut.yaml", "pin-unit-tests"),
+        ("e2e-ppu.yaml", "prepare"),
+        ("e2e-ppu.yaml", "e2e"),
+    ],
+)
+@pytest.mark.parametrize("different_owner", [False, True])
+@pytest.mark.parametrize("expected", ["current", "wrong", "empty"])
+def test_revision_guard_handles_checkout_ownership(
+    tmp_path, filename, job_id, different_owner, expected
+):
+    checkout = tmp_path / "checkout with spaces"
+    checkout.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(
+        HOME=str(tmp_path),
+        GIT_CONFIG_NOSYSTEM="1",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_AUTHOR_NAME="CI test",
+        GIT_AUTHOR_EMAIL="ci@example.invalid",
+        GIT_COMMITTER_NAME="CI test",
+        GIT_COMMITTER_EMAIL="ci@example.invalid",
+    )
+
+    def git(*args):
+        return subprocess.run(
+            ["git", *args], cwd=checkout, env=env, capture_output=True, text=True
+        )
+
+    assert git("init", "-q").returncode == 0
+    created = git("commit", "--allow-empty", "-qm", "fixture")
+    assert created.returncode == 0, created.stderr
+    head = git("rev-parse", "HEAD").stdout.strip()
+    assert len(head) == 40
+    env["GIT_TEST_ASSUME_DIFFERENT_OWNER"] = str(int(different_owner))
+    if different_owner:
+        assert "dubious ownership" in git("rev-parse", "HEAD").stderr
+    env["EXPECTED_SAIL_SHA"] = {"current": head, "wrong": "0" * 40, "empty": ""}[
+        expected
+    ]
+    steps = load_workflow(filename)["jobs"][job_id]["steps"]
+    guard = next(s for s in steps if s.get("name") == "Verify the checked-out revision")
+    assert (
+        guard["env"]["EXPECTED_SAIL_SHA"] == "${{ inputs.pr_head_sha || github.sha }}"
+    )
+    result = subprocess.run(
+        ["bash", "--noprofile", "--norc", "-euo", "pipefail", "-c", guard["run"]],
+        cwd=checkout,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert "dubious ownership" not in result.stderr, result.stderr
+    assert (result.returncode == 0) == (expected == "current"), result.stderr
+    assert "safe.directory=*" not in guard["run"]
+    assert "git config" not in guard["run"]
+    if different_owner:
+        assert "dubious ownership" in git("rev-parse", "HEAD").stderr
+    assert not (tmp_path / ".gitconfig").exists()
 
 
 @pytest.mark.parametrize("filename", ["ppu-pin-ut.yaml", "e2e-ppu.yaml"])
