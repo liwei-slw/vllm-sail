@@ -1,0 +1,52 @@
+name: PPU CI report
+
+on:
+  workflow_run:
+    workflows: [PPU PR CI]
+    types: [requested, in_progress, completed]
+
+permissions: {}
+cache-mode: none
+
+jobs:
+  identify:
+    if: github.repository == 't-head/vllm-sail'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    outputs:
+      pr_number: ${{ steps.identity.outputs.pr_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Resolve the trusted request identity
+        id: identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m scripts.ci.ppu_ci_report identify
+
+  report:
+    needs: identify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: ppu-control-pr-${{ needs.identify.outputs.pr_number }}
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Publish checks from the GitHub jobs API
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python -m scripts.ci.ppu_ci_report

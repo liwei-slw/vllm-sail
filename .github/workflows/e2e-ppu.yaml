@@ -8,6 +8,14 @@ name: E2E PPU smoke
 on:
   workflow_call:
     inputs:
+      pr_mode:
+        description: Enforce PR artifact identity for on-demand execution
+        type: boolean
+        default: false
+      pr_head_sha:
+        description: Validated immutable PR head SHA
+        type: string
+        default: ""
       build_run_id:
         description: Run supplying the ppu-wheels artifact
         required: true
@@ -36,6 +44,8 @@ on:
         required: true
         default: reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb
         type: string
+
+cache-mode: none
 
 permissions:
   contents: read
@@ -73,10 +83,22 @@ jobs:
             done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
           done
 
+      - name: Require disabled cache access
+        shell: bash
+        run: test "${ACTIONS_CACHE_MODE:-}" = none
+
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
         with:
           github-server-url: https://github.com
+          ref: ${{ inputs.pr_head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify the checked-out revision
+        shell: bash
+        env:
+          EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
 
       - name: Select models
         id: select
@@ -117,10 +139,22 @@ jobs:
             done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
           done
 
+      - name: Require disabled cache access
+        shell: bash
+        run: test "${ACTIONS_CACHE_MODE:-}" = none
+
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
         with:
           github-server-url: https://github.com
+          ref: ${{ inputs.pr_head_sha || github.sha }}
+          persist-credentials: false
+
+      - name: Verify the checked-out revision
+        shell: bash
+        env:
+          EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SAIL_SHA"
 
       - name: Download CI-built wheels
         uses: actions/download-artifact@v4
@@ -132,13 +166,15 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Require the current PR artifact and verified upstream pin
-        if: github.event_name == 'pull_request'
+        if: inputs.pr_mode || github.event_name == 'pull_request'
         shell: bash
+        env:
+          EXPECTED_SAIL_SHA: ${{ inputs.pr_head_sha || github.sha }}
         run: |
           pin="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           [[ "${pin}" =~ ^[0-9a-f]{40}$ ]]
           python scripts/ci/ppu_wheel_manifest.py verify wheels \
-            --vllm-commit "${pin}" --sail-commit "${GITHUB_SHA}"
+            --vllm-commit "${pin}" --sail-commit "${EXPECTED_SAIL_SHA}"
 
       - name: Run PPU E2E smoke
         uses: t-head/ppu-scheduler-action@main

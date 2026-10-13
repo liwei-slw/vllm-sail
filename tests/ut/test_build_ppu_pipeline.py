@@ -101,7 +101,9 @@ def test_build_workflow_uses_script_and_retains_artifacts() -> None:
         }
         assert set(uploads) == {
             "ppu-wheels-${{ github.run_id }}",
-            "ppu-build-diagnostics-${{ github.run_id }}",
+            "ppu-build-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}"
+            if job == "build"
+            else "ppu-build-diagnostics-${{ github.run_id }}",
         }
         assert all(config["retention-days"] == 14 for config in uploads.values())
         assert (
@@ -689,3 +691,208 @@ def test_runtime_scripts_prepare_same_torch_before_installing_wheels(script):
     verify = text.index('ppu_image_stack.py" verify')
     assert prepare < install < verify
     assert "--constraints" in text[prepare:install]
+
+
+def load_workflow(name):
+    import yaml
+
+    path = WORKFLOW.parent / name
+    assert path.exists(), f"Missing workflow: {name}"
+    return yaml.safe_load(path.read_text())
+
+
+@pytest.mark.parametrize(
+    "name", ["run-ci-command.yml", "notify-ci-authorized.yml", "ppu-ci-report.yml"]
+)
+def test_control_workflows_only_execute_immutable_trusted_code(name):
+    workflow = load_workflow(name)
+    assert workflow["permissions"] == {}
+    assert workflow["cache-mode"] == "none"
+    for job in workflow["jobs"].values():
+        assert job["runs-on"] == "ubuntu-latest"
+        for step in job["steps"]:
+            if step.get("uses", "").startswith("actions/checkout@"):
+                expected_ref = (
+                    "${{ steps.default-revision.outputs.result }}"
+                    if name == "notify-ci-authorized.yml"
+                    else "${{ github.workflow_sha }}"
+                )
+                assert step["with"]["ref"] == expected_ref
+                assert step["with"]["persist-credentials"] is False
+            assert "download-artifact" not in step.get("uses", "")
+            assert "${{ github.event" not in step.get("run", "")
+    if name == "run-ci-command.yml":
+        assert workflow[True] == {"issue_comment": {"types": ["created"]}}
+    elif name == "notify-ci-authorized.yml":
+        assert workflow[True] == {"pull_request_target": {"types": ["labeled"]}}
+        assert "actions" not in workflow["jobs"]["notify"]["permissions"]
+    else:
+        assert workflow[True]["workflow_run"]["workflows"] == ["PPU PR CI"]
+        assert set(workflow[True]["workflow_run"]["types"]) == {
+            "in_progress",
+            "completed",
+            "requested",
+        }
+
+
+def test_dispatch_entry_validates_before_reusable_ppu_chain():
+    workflow = load_workflow("ppu-pr-ci.yaml")
+    assert set(workflow[True]) == {"workflow_dispatch"}
+    assert set(workflow[True]["workflow_dispatch"]["inputs"]) == {
+        "pr_number",
+        "head_sha",
+        "base_sha",
+        "request_check_id",
+    }
+    assert workflow["cache-mode"] == "none"
+    validate = workflow["jobs"]["validate"]
+    assert validate["runs-on"] == "ubuntu-latest"
+    assert any("ppu_ci_command validate" in s.get("run", "") for s in validate["steps"])
+    pipeline = workflow["jobs"]["ppu"]
+    assert pipeline["name"] == "PPU"
+    assert pipeline["needs"] == "validate"
+    assert pipeline["permissions"] == {"contents": "read", "actions": "read"}
+    assert "secrets" not in pipeline
+    assert pipeline["uses"] == "./.github/workflows/build-ppu-wheels.yaml"
+    assert pipeline["with"] == {
+        "pr_mode": True,
+        "pr_number": "${{ needs.validate.outputs.pr_number }}",
+        "pr_head_sha": "${{ needs.validate.outputs.head_sha }}",
+    }
+    assert "inputs.pr_number" in workflow["concurrency"]["group"]
+    assert workflow["concurrency"]["cancel-in-progress"] is False
+
+
+def test_pr_mode_cannot_fall_into_manual_operator_qualification():
+    workflow = load_workflow("build-ppu-wheels.yaml")
+    assert "pull_request" in workflow[True]
+    assert "workflow_call" in workflow[True]
+    assert "inputs.pr_mode" in workflow["jobs"]["build"]["if"]
+    assert "!inputs.pr_mode" in workflow["jobs"]["detect-ops-changes"]["if"]
+    for job in ("smoke", "gate"):
+        assert "inputs.pr_mode" in workflow["jobs"][job]["if"]
+    for job in ("pin-unit-tests", "smoke"):
+        assert (
+            workflow["jobs"][job]["with"]["pr_head_sha"] == "${{ inputs.pr_head_sha }}"
+        )
+        assert (
+            workflow["jobs"][job]["with"]["pr_mode"] == "${{ inputs.pr_mode == true }}"
+        )
+    build = workflow["jobs"]["build"]
+    upload = next(s for s in build["steps"] if s["name"] == "Upload wheels")
+    assert upload["with"]["overwrite"] is True
+    assert upload["if"] == "success()"
+    assert "inputs.pr_number" in workflow["concurrency"]["group"]
+
+
+@pytest.mark.parametrize(
+    "name", ["build-ppu-wheels.yaml", "ppu-pin-ut.yaml", "e2e-ppu.yaml"]
+)
+def test_pr_test_jobs_disable_cache_and_checkout_bound_sha(name):
+    workflow = load_workflow(name)
+    assert workflow["cache-mode"] == "none"
+    assert workflow["permissions"] == {"contents": "read", "actions": "read"}
+    selected = {
+        "build-ppu-wheels.yaml": ["build"],
+        "ppu-pin-ut.yaml": ["pin-unit-tests"],
+        "e2e-ppu.yaml": ["prepare", "e2e"],
+    }[name]
+    for job_id in selected:
+        steps = workflow["jobs"][job_id]["steps"]
+        checkout = next(s for s in steps if s.get("uses") == "actions/checkout@v4")
+        assert checkout["with"]["ref"] == "${{ inputs.pr_head_sha || github.sha }}"
+        assert checkout["with"]["persist-credentials"] is False
+        assert any("ACTIONS_CACHE_MODE" in s.get("run", "") for s in steps)
+        assert any("git rev-parse HEAD" in s.get("run", "") for s in steps)
+    text = (WORKFLOW.parent / name).read_text()
+    assert "secrets: inherit" not in text and "actions/cache" not in text
+    if name != "build-ppu-wheels.yaml":
+        assert "inputs.pr_mode" in text
+        assert "EXPECTED_SAIL_SHA" in text
+
+
+@pytest.mark.parametrize("filename", ["ppu-pin-ut.yaml", "e2e-ppu.yaml"])
+@pytest.mark.parametrize("damage", [None, "vllm", "vllm-sail", "missing"])
+def test_actual_workflow_manifest_steps_bind_pr_sha(tmp_path, filename, damage):
+    from test_ppu_wheel_manifest import make_wheels, record
+
+    wheels = tmp_path / "wheels"
+    wheels.mkdir()
+    make_wheels(wheels)
+    data = record(wheels)
+    data["commits"] = {"vllm": "a" * 40, "vllm-sail": "b" * 40}
+    if damage == "missing":
+        del data["commits"]
+    elif damage:
+        data["commits"][damage] = "c" * 40
+    (wheels / "wheel-manifest.json").write_text(json.dumps(data))
+    (tmp_path / ".github").mkdir()
+    (tmp_path / ".github/vllm-main-verified.commit").write_text("a" * 40)
+    (tmp_path / "scripts/ci").mkdir(parents=True)
+    (tmp_path / "scripts/ci/ppu_wheel_manifest.py").symlink_to(
+        ROOT / "scripts/ci/ppu_wheel_manifest.py"
+    )
+    workflow = load_workflow(filename)
+    steps = [s for j in workflow["jobs"].values() for s in j["steps"]]
+    step = next(
+        s
+        for s in steps
+        if s.get("name")
+        in {
+            "Verify wheel manifest and pin",
+            "Require the current PR artifact and verified upstream pin",
+        }
+    )
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", step["run"]],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
+            "REQUIRE_PR_ARTIFACT": "true",
+            "WHEELS_DIR": str(wheels),
+            "EXPECTED_SAIL_SHA": "b" * 40,
+            "GITHUB_SHA": "c" * 40,
+            "GITHUB_OUTPUT": str(tmp_path / "output"),
+            "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert (result.returncode == 0) == (damage is None), result.stderr
+
+
+def test_cache_restriction_propagates_without_nested_overrides():
+    pending = ["ppu-pr-ci.yaml"]
+    visited = set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        workflow = load_workflow(name)
+        assert workflow.get("cache-mode", "none") == "none"
+        for job in workflow["jobs"].values():
+            assert job.get("cache-mode", "none") == "none"
+            assert "secrets" not in job
+            if job.get("uses", "").startswith("./.github/workflows/"):
+                pending.append(job["uses"].split("/")[-1])
+    assert {
+        "ppu-pr-ci.yaml",
+        "build-ppu-wheels.yaml",
+        "ppu-pin-ut.yaml",
+        "e2e-ppu.yaml",
+    } <= visited
+
+
+def test_cpu_events_unchanged_and_token_is_read_only():
+    workflow = load_workflow("ut.yaml")
+    assert workflow[True] == {
+        "pull_request": None,
+        "push": {"branches": ["main", "master"]},
+        "workflow_dispatch": None,
+    }
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["jobs"]["cpu-unit-tests"]["strategy"]["matrix"][
+        "python-version"
+    ] == ["3.10", "3.11", "3.12", "3.13"]
