@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""无需 Torch 或设备的 ACEXT 动态链接兼容测试。"""
+"""Test ACEXT dynamic-link compatibility without Torch or a device."""
 
 from __future__ import annotations
 
@@ -53,12 +53,14 @@ def test_acext_consumers_prepare_runtime_before_symbol_import(consumer):
             and previous.value.func.id == "load_acext"
             for block in blocks
             for previous in block[: block.index(node)]
-        ), f"{consumer} 未在导入 SDK 符号之前调用兼容加载器"
+        ), f"{consumer} must load the runtime before importing SDK symbols"
 
 
 def _runtime():
     name = "vllm_sail.utils.acext"
-    assert importlib.util.find_spec(name) is not None, "缺少 ACEXT 兼容加载器"
+    assert importlib.util.find_spec(name) is not None, (
+        "ACEXT compatibility loader is missing"
+    )
     return importlib.reload(importlib.import_module(name))
 
 
@@ -86,7 +88,9 @@ def test_healthy_acext_does_not_load_sdk_library(monkeypatch) -> None:
     runtime = _runtime()
     backend = ModuleType("acext")
     _intercept_import(monkeypatch, lambda: backend)
-    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: pytest.fail("不应预加载"))
+    monkeypatch.setattr(
+        ctypes, "CDLL", lambda *a, **k: pytest.fail("preloading must not occur")
+    )
     assert runtime.load_acext() is backend
 
 
@@ -146,7 +150,9 @@ def test_unrelated_loader_errors_propagate_without_preloading(monkeypatch, error
         raise error
 
     _intercept_import(monkeypatch, import_acext)
-    monkeypatch.setattr(ctypes, "CDLL", lambda *a, **k: pytest.fail("不应预加载"))
+    monkeypatch.setattr(
+        ctypes, "CDLL", lambda *a, **k: pytest.fail("preloading must not occur")
+    )
     with pytest.raises(type(error)) as caught:
         runtime.load_acext()
     assert caught.value is error

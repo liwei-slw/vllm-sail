@@ -105,6 +105,8 @@ def fused_indexer_q_rope_quant(
             index_weights_head_scale,
             output_buffers=output_buffers,
         )
+    if output_buffers is not None:
+        raise ValueError("output_buffers is supported only by the PPU 1.0 INT8 path")
     return original(
         positions,
         index_q,

@@ -56,9 +56,27 @@ def installed(monkeypatch, patch_utils_module):
 
     calls = []
 
-    def upstream_q(*args, **kwargs):
+    def upstream_q(
+        positions,
+        index_q,
+        index_q_cos_sin_cache,
+        index_weights,
+        index_weights_softmax_scale,
+        index_weights_head_scale,
+        use_fp4=False,
+        weights_out_dtype="float32",
+    ):
+        args = (
+            positions,
+            index_q,
+            index_q_cos_sin_cache,
+            index_weights,
+            index_weights_softmax_scale,
+            index_weights_head_scale,
+        )
+        kwargs = {"use_fp4": use_fp4, "weights_out_dtype": weights_out_dtype}
         calls.append(("upstream_q", args, kwargs))
-        if platform.ppu and platform.capability == (8, 0) and not kwargs.get("use_fp4"):
+        if platform.ppu and platform.capability == (8, 0) and not use_fp4:
             raise ValueError("type fp8e4nv not supported in this architecture")
         return "upstream_q"
 
@@ -133,6 +151,30 @@ def test_other_query_paths_delegate(installed, ppu, capability, use_fp4):
         )
         == "upstream_q"
     )
+    assert calls[-1][2] == {
+        "use_fp4": use_fp4,
+        "weights_out_dtype": "float32",
+    }
+
+
+@pytest.mark.parametrize(
+    "consumer", [Q_PROVIDER, f"{BASE}.common.ops", f"{BASE}.attention"]
+)
+@pytest.mark.parametrize(
+    "ppu,capability,use_fp4",
+    [(False, (8, 0), False), (True, (8, 9), False), (True, (8, 0), True)],
+)
+def test_delegated_query_rejects_output_buffers(
+    installed, consumer, ppu, capability, use_fp4
+):
+    platform, modules, calls, _ = installed
+    platform.ppu, platform.capability = ppu, capability
+    query = modules[consumer].fused_indexer_q_rope_quant
+    with pytest.raises(ValueError, match="output_buffers.*PPU 1.0 INT8"):
+        query(*range(6), use_fp4=use_fp4, output_buffers=(object(), object()))
+    assert not calls
+    assert query(*range(6), use_fp4=use_fp4, output_buffers=None) == "upstream_q"
+    assert calls[-1][1] == tuple(range(6))
     assert calls[-1][2] == {
         "use_fp4": use_fp4,
         "weights_out_dtype": "float32",

@@ -461,10 +461,120 @@ def test_prepare_installs_only_verified_torch_and_keeps_other_packages(
     assert image_stack.tree_digest(sdk) == before
 
 
+@pytest.mark.parametrize("failure", ["timeout", "connection", "read", "http503"])
+def test_prepare_retries_transient_download_before_installing(
+    image_stack, stack_trees, torch_archive, monkeypatch, failure
+):
+    import io
+    import time
+    import urllib.error
+
+    original_open = image_stack.urllib.request.urlopen
+    attempts, delays, installs, responses = [], [], [], []
+    errors = {
+        "timeout": TimeoutError("download timed out"),
+        "connection": urllib.error.URLError(ConnectionResetError("connection reset")),
+        "http503": urllib.error.HTTPError(
+            "https://example.invalid", 503, "busy", {}, None
+        ),
+    }
+
+    class InterruptedResponse(io.BytesIO):
+        def read(self, size=-1):
+            if self.tell():
+                raise ConnectionResetError("download interrupted")
+            return super().read(5)
+
+    def open_archive(url, *, timeout):
+        attempts.append((url, timeout))
+        if len(attempts) <= 2:
+            if failure != "read":
+                raise errors[failure]
+            response = InterruptedResponse(b"partial archive")
+            responses.append(response)
+            return response
+        return original_open(url, timeout=timeout)
+
+    def install(command, **kwargs):
+        assert Path(command[-1]).read_bytes() == b"verified torch wheel"
+        installs.append(command)
+
+    monkeypatch.setattr(image_stack, "package_versions", lambda: {})
+    monkeypatch.setattr(image_stack.urllib.request, "urlopen", open_archive)
+    monkeypatch.setattr(time, "sleep", delays.append)
+    monkeypatch.setattr(subprocess, "run", install)
+    image_stack.install_torch(stack_trees[0])
+    assert attempts == [(image_stack.TORCH_OVERRIDE["torch_archive_url"], 90)] * 3
+    assert delays == [1, 2]
+    assert len(installs) == 1
+    assert all(response.closed for response in responses)
+
+
+def test_prepare_download_stops_after_three_attempts(
+    image_stack, stack_trees, monkeypatch
+):
+    import time
+
+    failure = TimeoutError("download timed out")
+    attempts, delays = [], []
+
+    def open_archive(*args, **kwargs):
+        attempts.append(args)
+        raise failure
+
+    monkeypatch.setattr(image_stack, "package_versions", lambda: {})
+    monkeypatch.setattr(image_stack.urllib.request, "urlopen", open_archive)
+    monkeypatch.setattr(time, "sleep", delays.append)
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("failed downloads must not reach installation"),
+    )
+    with pytest.raises(TimeoutError) as caught:
+        image_stack.install_torch(stack_trees[0])
+    assert caught.value is failure
+    assert len(attempts) == 3
+    assert delays == [1, 2]
+
+
+def test_prepare_does_not_retry_http_not_found(image_stack, stack_trees, monkeypatch):
+    import time
+    import urllib.error
+
+    failure = urllib.error.HTTPError(
+        "https://example.invalid", 404, "missing", {}, None
+    )
+    attempts = []
+
+    def open_archive(*args, **kwargs):
+        attempts.append(args)
+        raise failure
+
+    monkeypatch.setattr(image_stack, "package_versions", lambda: {})
+    monkeypatch.setattr(image_stack.urllib.request, "urlopen", open_archive)
+    monkeypatch.setattr(
+        time, "sleep", lambda _: pytest.fail("permanent errors must not be retried")
+    )
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *a, **kw: pytest.fail("failed downloads must not reach installation"),
+    )
+    with pytest.raises(urllib.error.HTTPError) as caught:
+        image_stack.install_torch(stack_trees[0])
+    assert caught.value is failure
+    assert len(attempts) == 1
+
+
 @pytest.mark.parametrize("damage", ["archive", "wheel", "missing", "duplicate"])
 def test_prepare_rejects_invalid_torch_before_pip(
     image_stack, stack_trees, torch_archive, monkeypatch, damage
 ):
+    import time
+
+    monkeypatch.setattr(
+        time, "sleep", lambda _: pytest.fail("validation errors must not be retried")
+    )
     if damage in ("archive", "wheel"):
         image_stack.TORCH_OVERRIDE[f"torch_{damage}_sha256"] = "0" * 64
     elif damage == "missing":

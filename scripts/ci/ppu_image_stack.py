@@ -10,6 +10,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -135,10 +137,35 @@ def install_torch(sdk):
             file=sys.stderr,
             flush=True,
         )
-        with urllib.request.urlopen(
-            TORCH_OVERRIDE["torch_archive_url"], timeout=90
-        ) as source:
-            copy_verified(source, archive, TORCH_OVERRIDE["torch_archive_sha256"])
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(
+                    TORCH_OVERRIDE["torch_archive_url"], timeout=90
+                ) as source:
+                    copy_verified(
+                        source, archive, TORCH_OVERRIDE["torch_archive_sha256"]
+                    )
+                break
+            except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+                if isinstance(error, urllib.error.HTTPError) and error.code not in (
+                    408,
+                    429,
+                    500,
+                    502,
+                    503,
+                    504,
+                ):
+                    raise
+                if attempt == 2:
+                    raise
+                delay = 2**attempt
+                print(
+                    f"Torch download attempt {attempt + 1}/3 failed: {error}; "
+                    f"retrying in {delay}s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                time.sleep(delay)
         with tarfile.open(archive, "r:gz") as source:
             wheels = [
                 member
