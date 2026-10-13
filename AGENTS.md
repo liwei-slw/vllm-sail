@@ -5,9 +5,9 @@ User-facing overview: [README.md](README.md). Contribution workflow:
 
 ## Project terminology
 
-- Display name: **vLLM SAIL**. **SAIL** is the software stack; **Zhenwu (真武)**
-  is the hardware product name. Document **Zhenwu 810E** and **Zhenwu M890** PPU
-  cards. Do not list the 810 model or use ZW-prefixed product names in prose.
+- Display name: **vLLM SAIL**. **SAIL** is the software brand; **Zhenwu (真武)**
+  is the hardware product name. Document **Zhenwu 810E** and **Zhenwu M890**
+  T-Head AI chips.
 - Python distribution: `vllm-sail`; import package: `vllm_sail`.
 - Use **SAIL SDK** in prose. Preserve `PPU_SDK`, the `ppu` plugin name,
   `PPUPlatform`, and code-facing device identifiers. Explain identifiers such as

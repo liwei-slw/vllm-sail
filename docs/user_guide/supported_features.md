@@ -9,7 +9,7 @@ support for a specific deployment.
 
 | Component | Scope |
 | --- | --- |
-| Hardware | Zhenwu 810E and Zhenwu M890 PPU cards |
+| Hardware | Zhenwu 810E and Zhenwu M890 AI chips |
 | Native targets | PPU 1.0 (`ppu_10`) and PPU 1.5 (`ppu_15`) |
 | Bundled tuning data | Configurations include `PPU-ZW810E` (Zhenwu 810E) and `ZW-M890P` (Zhenwu M890); coverage varies by shape and backend |
 | vLLM | `>=0.31.0,<0.32.0`; generated native sources pinned to v0.31.0 |
