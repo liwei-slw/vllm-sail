@@ -361,13 +361,31 @@ def create_request(api, pr, comment, context, command, *, behind=0, retry=None):
     )
 
 
-def cancel_pr(api, pr, comment, context):
-    requests = {
-        check["id"]: (check, record) for check, record in requests_for_head(api, pr)
+def requests_for_pr(api, pr):
+    # 回执在任何请求写入前记录 head；它只提供查找线索，不授予取消权限。
+    heads = {sha(pr["head"]["sha"])}
+    for receipt in api.pages(f"issues/{number(pr['number'])}/comments"):
+        if receipt.get("user", {}).get("login") != "github-actions[bot]":
+            continue
+        match = re.match(
+            r"<!-- ppu-ci-command:[1-9][0-9]* -->\n"
+            r"<!-- ppu-ci-head:([0-9a-f]{40}) -->\n",
+            receipt.get("body", ""),
+        )
+        if match:
+            heads.add(match[1])
+    return {
+        check["id"]: (check, record)
+        for head in sorted(heads)
+        for check, record in requests_for_head(
+            api, {"number": pr["number"], "head": {"sha": head}}
+        )
     }
-    for run in api.pages(
-        f"actions/workflows/{EXECUTOR}/runs?event=workflow_dispatch", "workflow_runs"
-    ):
+
+
+def cancel_pr(api, pr, comment, context):
+    requests = requests_for_pr(api, pr)
+    for run in api.pages(f"actions/workflows/{EXECUTOR}/runs", "workflow_runs"):
         title = TITLE.fullmatch(run.get("display_title", ""))
         if title and int(title[1]) == pr["number"] and run["status"] != "completed":
             check = api.get(f"check-runs/{number(title[3])}")
@@ -489,7 +507,9 @@ def handle_event(event, api, context):
         reply(
             api,
             pr_number,
-            marker + f"\nProcessing `{command}`: {run_url(api, context['run_id'])}",
+            marker
+            + f"\n<!-- ppu-ci-head:{sha(pr['head']['sha'])} -->"
+            + f"\nProcessing `{command}`: {run_url(api, context['run_id'])}",
         )
         if command.startswith("/ci run"):
             run_command(api, pr, comment, context, command)

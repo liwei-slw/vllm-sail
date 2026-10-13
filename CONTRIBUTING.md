@@ -152,7 +152,11 @@ a new comment can retry that source after the API problem is resolved. Lost
 responses are matched to a unique new run, never resent automatically. After a
 maintainer confirms that no run was accepted, `/ci cancel` invalidates the
 pending request and a new `/ci run` can start fresh. Cancellation invalidates the
-request before asking Actions to stop it.
+request before asking Actions to stop it. The controller records a processing
+receipt before creating any request. Its head index lets cancellation find older
+heads even when an accepted or uncertain dispatch has no visible executor run.
+Keep these bot receipts while requests are pending; they are lookup hints, not
+authorization, and every discovered request is still verified against its PR.
 
 `PPU CI report` also reconciles unfinished terminal runs every ten minutes. It
 scans all executor pages and processes up to 100 outstanding reports, oldest

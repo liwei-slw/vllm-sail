@@ -779,6 +779,151 @@ def test_cancel_queued_dispatch_blocks_late_execution(controller, api, context):
         )
 
 
+@pytest.mark.parametrize("dispatch_state", ["accepted", "uncertain", "preparing"])
+def test_cancel_old_head_without_executor(controller, api, context, dispatch_state):
+    api.fail_dispatch = dispatch_state == "uncertain"
+    request = launch(controller, api, context)
+    record = json.loads(request["output"]["summary"])
+    record["dispatch_state"] = dispatch_state
+    controller.save_record(api, request, record)
+    inputs = {
+        "pr_number": "7",
+        "head_sha": HEAD,
+        "base_sha": BASE,
+        "request_check_id": str(request["id"]),
+    }
+    before_dispatches = copy.deepcopy(api.dispatches)
+    api.pr["head"]["sha"] = "d" * 40
+    next_comment(api, context, "/ci cancel")
+    controller.handle_event(event(api), api, context)
+    assert json.loads(api.checks[request["id"]]["output"]["summary"])["cancelled"]
+    assert all(c["conclusion"] == "cancelled" for c in api.checks.values())
+    assert not api.cancellations and api.dispatches == before_dispatches
+    api.pr["head"]["sha"] = HEAD
+    run = executor(api, request)
+    with pytest.raises(controller.Rejected, match="cancelled"):
+        controller.validate_execution(
+            api, inputs, run, {**context, "run_id": run["id"]}
+        )
+
+
+def test_request_receipt_indexes_head_before_any_check(
+    controller, api, context, monkeypatch
+):
+    original = api.post
+
+    def check_receipt(path, payload=None):
+        if path == "check-runs":
+            assert any(
+                f"<!-- ppu-ci-head:{HEAD} -->" in c["body"] for c in api.messages
+            )
+        return original(path, payload)
+
+    monkeypatch.setattr(api, "post", check_receipt)
+    launch(controller, api, context)
+
+
+def test_cancel_discovers_old_receipts_across_pages(
+    controller, api, context, monkeypatch
+):
+    from scripts.ci.ppu_ci_common import GitHub
+
+    launch(controller, api, context)
+    api.messages[:0] = [
+        {"user": {"login": "author"}, "body": "ordinary comment"} for _ in range(100)
+    ]
+    original_get, original_pages = api.get, api.pages
+    fetched = []
+
+    def get_page(path):
+        if path.startswith("issues/7/comments?"):
+            page = int(path.rsplit("=", 1)[1])
+            fetched.append(page)
+            return copy.deepcopy(api.messages[(page - 1) * 100 : page * 100])
+        return original_get(path)
+
+    def pages(path, key=None):
+        if path == "issues/7/comments":
+            return GitHub.pages(api, path, key)
+        return original_pages(path, key)
+
+    monkeypatch.setattr(api, "get", get_page)
+    monkeypatch.setattr(api, "pages", pages)
+    api.pr["head"]["sha"] = "d" * 40
+    next_comment(api, context, "/ci cancel")
+    controller.handle_event(event(api), api, context)
+    assert 2 in fetched
+    assert all(c["conclusion"] == "cancelled" for c in api.checks.values())
+
+
+@pytest.mark.parametrize("mutation", ["user", "quoted", "invalid_sha"])
+def test_receipt_hint_is_not_accepted_from_arbitrary_comment(
+    controller, api, context, mutation
+):
+    launch(controller, api, context)
+    receipt = copy.deepcopy(api.messages[0])
+    if mutation == "user":
+        receipt["user"]["login"] = "author"
+    elif mutation == "quoted":
+        receipt["body"] = "> " + receipt["body"]
+    else:
+        receipt["body"] = receipt["body"].replace(HEAD, "../../invalid")
+    api.messages = [receipt]
+    api.pr["head"]["sha"] = "d" * 40
+    before = copy.deepcopy(api.checks)
+    next_comment(api, context, "/ci cancel")
+    controller.handle_event(event(api), api, context)
+    assert api.checks == before and not api.cancellations
+
+
+def test_receipt_lookup_preserves_other_pr_and_completed_checks(
+    controller, api, context
+):
+    request = launch(controller, api, context)
+    for check in api.checks.values():
+        check.update(status="completed", conclusion="success")
+    completed = copy.deepcopy(api.checks)
+    api.pr["head"]["sha"] = "d" * 40
+    next_comment(api, context, "/ci run")
+    controller.handle_event(event(api), api, context)
+    pending = latest_request(api)
+    other = copy.deepcopy(pending)
+    other["id"] = 999
+    record = json.loads(other["output"]["summary"])
+    record["pr_number"] = 8
+    other["output"]["summary"] = json.dumps(record)
+    api.checks[999] = copy.deepcopy(other)
+    api.pr["head"]["sha"] = "e" * 40
+    next_comment(api, context, "/ci cancel")
+    controller.handle_event(event(api), api, context)
+    assert {key: api.checks[key] for key in completed} == completed
+    assert api.checks[999] == other
+    assert api.checks[pending["id"]]["conclusion"] == "cancelled"
+    assert api.checks[request["id"]]["conclusion"] == "success"
+
+
+@pytest.mark.parametrize("mutation", ["head", "authorization", "provenance"])
+def test_old_receipt_does_not_bypass_final_cancel_validation(
+    controller, api, context, mutation
+):
+    request = launch(controller, api, context)
+    api.pr["head"]["sha"] = "d" * 40
+    if mutation == "head":
+        api.change_on_read = api.pr_reads + 2
+        api.pr["head"]["sha"] = "e" * 40
+    elif mutation == "authorization":
+        api.pr["labels"] = []
+    else:
+        api.runs[100]["event"] = "pull_request"
+    before = copy.deepcopy(api.checks)
+    next_comment(api, context, "/ci cancel")
+    controller.handle_event(event(api), api, context)
+    assert api.checks == before and not api.cancellations
+    assert not json.loads(api.checks[request["id"]]["output"]["summary"]).get(
+        "cancelled"
+    )
+
+
 def test_retry_respects_revoked_authorization(controller, api, context):
     request = launch(controller, api, context)
     executor(api, request).update(status="completed", conclusion="failure")
