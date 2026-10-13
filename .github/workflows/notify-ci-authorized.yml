@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     concurrency:
-      group: ppu-control-pr-${{ github.event.pull_request.number }}
+      group: ppu-notification-pr-${{ github.event.pull_request.number }}
       cancel-in-progress: false
     permissions:
       contents: read

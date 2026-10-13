@@ -7,6 +7,8 @@ import json
 import os
 import re
 import urllib.request
+from datetime import datetime, timezone
+from urllib.error import HTTPError
 from urllib.parse import quote, unquote, urlsplit
 
 REPOSITORY = "t-head/vllm-sail"
@@ -153,6 +155,12 @@ def request_record(api, check):
     require(check.get("name") == REQUEST_NAME, "Not a PPU CI request.")
     try:
         record = json.loads(check["output"]["summary"])
+        require(record.get("schema") == 2, "Unknown request schema; use `/ci run`.")
+        require(type(record["allow_stale"]) is bool, "Invalid stale authorization.")
+        require(
+            record["command"] in {"/ci run", "/ci run --allow-stale", "/ci retry"},
+            "Invalid request command.",
+        )
         require(
             record["repository"] == api.repo == REPOSITORY,
             "Request repository mismatch.",
@@ -226,18 +234,213 @@ def bound_checks(api, request, record):
     return found
 
 
-def matching_runs(api, check, record):
+def matching_runs(api, check, record, known_runs=None):
     expected = (
         f"PPU PR {record['pr_number']} head {record['head_sha']} request {check['id']}"
     )
     found = []
-    for run in api.pages(
-        f"actions/workflows/{EXECUTOR}/runs?event=workflow_dispatch", "workflow_runs"
-    ):
+    if known_runs is None:
+        # 不加 event/status 筛选，避免 GitHub 筛选查询的 1000 条上限。
+        known_runs = api.pages(f"actions/workflows/{EXECUTOR}/runs", "workflow_runs")
+    for run in known_runs:
         if run.get("display_title") == expected:
             execution_identity(api, run, check, record)
             found.append(run)
     return sorted(found, key=lambda run: run["id"])
+
+
+STAGES = dict(zip(("build", "pin", "smoke"), CONTEXTS[:3], strict=False))
+
+
+def pr_identity(pr):
+    return {
+        side: {
+            "sha": sha(pr[side]["sha"]),
+            "ref": pr[side]["ref"],
+            "repo": {key: pr[side]["repo"][key] for key in ("id", "full_name")},
+        }
+        for side in ("head", "base")
+    }
+
+
+def full_plan():
+    return {stage: {"mode": "run"} for stage in STAGES}
+
+
+def unique_execution(api, check, record, run):
+    execution_identity(api, run, check, record)
+    runs = matching_runs(api, check, record)
+    require(
+        len(runs) == 1
+        and runs[0]["id"] == run["id"]
+        and record.get("run_id", run["id"]) == run["id"],
+        "Replayed or ambiguous execution.",
+    )
+    require(run["run_attempt"] == 1, "Native Re-run is unsupported; use `/ci retry`.")
+
+
+def actual_jobs(api, run):
+    result, ids = {}, set()
+    for job in api.pages(f"actions/runs/{run['id']}/attempts/1/jobs", "jobs"):
+        require(job["id"] not in ids, "Duplicate job identity.")
+        ids.add(job["id"])
+        require(
+            job["run_attempt"] == 1 and job["run_id"] == run["id"],
+            "Job execution mismatch.",
+        )
+        name = job["name"]
+        if name == "validate" or name in {"PPU / " + c for c in CONTEXTS}:
+            require(name not in result, "Duplicate required job name.")
+            result[name] = job
+    return result
+
+
+def outcome(job):
+    value = job.get("conclusion") if job.get("status") == "completed" else None
+    return value if value in {"success", "cancelled", "timed_out"} else "failure"
+
+
+def build_artifact(api, run):
+    message = "Build artifact is missing, expired or changed; use `/ci run`."
+    artifacts = [
+        a
+        for a in api.pages(f"actions/runs/{run['id']}/artifacts", "artifacts")
+        if a.get("name") == f"ppu-wheels-{run['id']}"
+    ]
+    require(len(artifacts) == 1, message)
+    try:
+        artifact = api.get(f"actions/artifacts/{number(artifacts[0]['id'])}")
+    except HTTPError as error:
+        if error.code in {404, 410}:
+            raise Rejected(message) from error
+        raise
+    require(artifact == artifacts[0], message)
+    try:
+        expires = datetime.fromisoformat(artifact["expires_at"].replace("Z", "+00:00"))
+        require(
+            artifact["expired"] is False
+            and expires > datetime.now(timezone.utc)
+            and artifact["workflow_run"]["id"] == run["id"]
+            and artifact["workflow_run"]["head_sha"] == run["head_sha"]
+            and re.fullmatch(r"sha256:[0-9a-f]{64}", artifact["digest"]),
+            message,
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise Rejected(message) from error
+    return {"id": artifact["id"], "run_id": run["id"], "digest": artifact["digest"]}
+
+
+def request_plan(api, check, record, seen=()):
+    require(
+        check["id"] not in seen and len(seen) < 100,
+        "Cyclic or excessive retry lineage.",
+    )
+    if record["command"] != "/ci retry":
+        require(
+            not record.get("retry_of_request_id") and not record.get("retry_of_run_id"),
+            "Unexpected retry source.",
+        )
+        require(
+            record["allow_stale"] == (record["command"] == "/ci run --allow-stale"),
+            "Invalid stale authorization.",
+        )
+        return full_plan()
+    try:
+        source = api.get(f"check-runs/{number(record['retry_of_request_id'])}")
+        original = request_record(api, source)
+        require(
+            source["id"] < check["id"]
+            and all(
+                original[k] == record[k]
+                for k in (
+                    "repository",
+                    "pr_number",
+                    "head_sha",
+                    "base_sha",
+                    "control_sha",
+                    "default_branch",
+                    "pr_identity",
+                    "allow_stale",
+                )
+            ),
+            "Retry source identity changed; use `/ci run`.",
+        )
+        run = api.get(f"actions/runs/{number(record['retry_of_run_id'])}")
+        plan = retry_plan(api, source, original, run, (*seen, check["id"]))
+        require(plan == record["retry_plan"], "Retry evidence changed; use `/ci run`.")
+        return plan
+    except (KeyError, TypeError) as error:
+        raise Rejected("Missing retry evidence; use `/ci run`.") from error
+
+
+def execution_evidence(api, check, record, run, seen=()):
+    unique_execution(api, check, record, run)
+    validation = record.get("validation", {})
+    require(
+        isinstance(validation, dict)
+        and validation.get("run_id") == run["id"]
+        and validation.get("run_attempt") == 1,
+        "Missing validator binding.",
+    )
+    plan = request_plan(api, check, record, seen)
+    require(validation.get("plan") == plan, "Invalid validated plan.")
+    jobs = actual_jobs(api, run)
+    results, sources = {}, {}
+    validator_ok = outcome(jobs.get("validate", {})) == "success"
+    for stage, name in STAGES.items():
+        job = jobs.get("PPU / " + name, {})
+        if plan[stage]["mode"] == "reuse":
+            require(
+                not job
+                or (
+                    job.get("status") == "completed"
+                    and job.get("conclusion") == "skipped"
+                ),
+                "Reused stage unexpectedly executed.",
+            )
+            results[stage] = "success" if validator_ok else "failure"
+            sources[stage] = plan[stage]["source"]
+        else:
+            results[stage] = outcome(job) if validator_ok else "failure"
+            if results[stage] == "success":
+                sources[stage] = {
+                    "request_id": check["id"],
+                    "run_id": run["id"],
+                    "run_attempt": 1,
+                    "job_id": job["id"],
+                }
+    if results["build"] != "success":
+        for stage in ("pin", "smoke"):
+            results[stage] = "failure"
+            sources.pop(stage, None)
+    return results, sources, jobs
+
+
+def retry_plan(api, check, record, run, seen=()):
+    unique_execution(api, check, record, run)
+    require(run["status"] == "completed", "Retry source is still active.")
+    require(
+        record.get("dispatch_state") != "rejected",
+        "Rejected dispatch has no reusable execution.",
+    )
+    if "validation" not in record:
+        # 未通过验证的运行没有可复用证据，只能重新执行全部阶段。
+        return full_plan()
+    results, sources, _ = execution_evidence(api, check, record, run, seen)
+    plan = full_plan()
+    if results["build"] != "success":
+        return plan
+    source = sources["build"]
+    artifact = build_artifact(api, api.get(f"actions/runs/{source['run_id']}"))
+    require(
+        source.get("artifact", artifact) == artifact,
+        "Build artifact changed; use `/ci run`.",
+    )
+    sources["build"] = {**source, "artifact": artifact}
+    for stage in STAGES:
+        if results[stage] == "success":
+            plan[stage] = {"mode": "reuse", "source": sources[stage]}
+    return plan
 
 
 def behind_base(api, pr):

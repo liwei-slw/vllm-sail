@@ -735,6 +735,93 @@ def test_control_workflows_only_execute_immutable_trusted_code(name):
         }
 
 
+def workflow_condition(
+    expression, *, pr_mode=True, attempt=1, plan=None, build="success", artifact="500"
+):
+    expression = expression.removeprefix("${{").removesuffix("}}").strip()
+    context = {
+        "github": {
+            "run_attempt": str(attempt),
+            "run_id": "200",
+            "repository": "t-head/vllm-sail",
+            "ref": "refs/heads/main",
+            "event_name": "workflow_dispatch" if pr_mode else "pull_request",
+            "event": {"repository": {"default_branch": "main"}},
+        },
+        "inputs": {
+            "pr_mode": pr_mode,
+            "existing_build_run_id": "",
+            "build_artifact_id": artifact,
+            "execution_plan": json.dumps(
+                {
+                    "run_id": 200,
+                    "run_attempt": 1,
+                    "plan": plan
+                    or {s: {"mode": "run"} for s in ("build", "pin", "smoke")},
+                }
+            ),
+        },
+        "needs": {"build": {"result": build}, "validate": {"result": "success"}},
+    }
+    code = (
+        "const {github, inputs, needs} = JSON.parse(process.argv[1]); const fromJSON=JSON.parse; const fromJson=JSON.parse; const always=()=>true; const cancelled=()=>false; const success=()=>true; const format=(s,v)=>s.replace('{0}',v); console.log(Boolean("
+        + expression
+        + "));"
+    )
+    result = subprocess.run(
+        ["node", "-e", code, json.dumps(context)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip() == "true"
+
+
+@pytest.mark.parametrize(
+    "filename,job",
+    [
+        ("ppu-pr-ci.yaml", "validate"),
+        ("ppu-pr-ci.yaml", "ppu"),
+        ("build-ppu-wheels.yaml", "build"),
+        ("build-ppu-wheels.yaml", "pin-unit-tests"),
+        ("build-ppu-wheels.yaml", "smoke"),
+        ("build-ppu-wheels.yaml", "gate"),
+        ("ppu-pin-ut.yaml", "pin-unit-tests"),
+        ("e2e-ppu.yaml", "prepare"),
+        ("e2e-ppu.yaml", "e2e"),
+    ],
+)
+def test_native_failed_rerun_cannot_schedule_any_on_demand_job(filename, job):
+    expression = load_workflow(filename)["jobs"][job].get("if", "true")
+    # 模拟成功 validate 被平台复用：所有后继仍必须独立拒绝 attempt 2。
+    assert not workflow_condition(expression, attempt=2)
+    assert workflow_condition(expression, attempt=1)
+    if filename != "ppu-pr-ci.yaml":
+        assert workflow_condition(expression, pr_mode=False, attempt=2)
+
+
+def test_native_rerun_has_independent_hosted_rejection():
+    job = load_workflow("ppu-pr-ci.yaml")["jobs"]["reject-native-rerun"]
+    assert "needs" not in job and job["runs-on"] == "ubuntu-latest"
+    assert workflow_condition(job["if"], attempt=2)
+    assert not workflow_condition(job["if"], attempt=1)
+    assert "/ci retry" in job["steps"][0]["run"]
+
+
+@pytest.mark.parametrize("stage,job", [("pin", "pin-unit-tests"), ("smoke", "smoke")])
+def test_retry_test_scheduling_requires_proven_build_reuse(stage, job):
+    expr = load_workflow("build-ppu-wheels.yaml")["jobs"][job]["if"]
+    plan = {s: {"mode": "run"} for s in ("build", "pin", "smoke")}
+    assert not workflow_condition(expr, plan=plan, build="skipped")
+    plan["build"] = {
+        "mode": "reuse",
+        "source": {"run_id": 199, "artifact": {"id": 900}},
+    }
+    assert workflow_condition(expr, plan=plan, build="skipped")
+    plan[stage] = {"mode": "reuse"}
+    assert not workflow_condition(expr, plan=plan, build="skipped")
+
+
 def test_dispatch_entry_validates_before_reusable_ppu_chain():
     workflow = load_workflow("ppu-pr-ci.yaml")
     assert set(workflow[True]) == {"workflow_dispatch"}
@@ -755,6 +842,7 @@ def test_dispatch_entry_validates_before_reusable_ppu_chain():
     assert "secrets" not in pipeline
     assert pipeline["uses"] == "./.github/workflows/build-ppu-wheels.yaml"
     assert pipeline["with"] == {
+        "execution_plan": "${{ needs.validate.outputs.execution_plan }}",
         "pr_mode": True,
         "pr_number": "${{ needs.validate.outputs.pr_number }}",
         "pr_head_sha": "${{ needs.validate.outputs.head_sha }}",
@@ -989,6 +1077,146 @@ def test_cache_restriction_propagates_without_nested_overrides():
         "ppu-pin-ut.yaml",
         "e2e-ppu.yaml",
     } <= visited
+
+
+@pytest.mark.parametrize("mode", ["run", "reuse"])
+@pytest.mark.parametrize(
+    "state", ["success", "skipped", "failure", "cancelled", "missing"]
+)
+def test_gate_distinguishes_verified_reuse_from_skipped(tmp_path, mode, state):
+    stage = (
+        {"mode": "run"}
+        if mode == "run"
+        else {
+            "mode": "reuse",
+            "source": {
+                "request_id": 1,
+                "run_id": 199,
+                "run_attempt": 1,
+                "job_id": 900,
+                "artifact": {"id": 500, "run_id": 199, "digest": "sha256:" + "e" * 64},
+            },
+        }
+    )
+    plan = {
+        "run_id": 200,
+        "run_attempt": 1,
+        "plan": {s: stage for s in ("build", "pin", "smoke")},
+    }
+    results = {j: {"result": state} for j in ("build", "pin-unit-tests", "smoke")}
+    if state == "missing":
+        results.pop("build")
+    step = load_workflow("build-ppu-wheels.yaml")["jobs"]["gate"]["steps"][0]
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", step["run"]],
+        env={
+            **os.environ,
+            "PATH": str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"],
+            "JOB_RESULTS": json.dumps(results),
+            "EXECUTION_PLAN": json.dumps(plan),
+            "PR_MODE": "true",
+            "GITHUB_RUN_ID": "200",
+            "GITHUB_RUN_ATTEMPT": "1",
+        },
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+    assert (result.returncode == 0) == (
+        state == ("success" if mode == "run" else "skipped")
+    ), result.stderr
+
+
+@pytest.mark.parametrize(
+    "filename,job",
+    [
+        ("ppu-pin-ut.yaml", "pin-unit-tests"),
+        ("e2e-ppu.yaml", "prepare"),
+        ("e2e-ppu.yaml", "e2e"),
+    ],
+)
+@pytest.mark.parametrize("artifact", ["", "0", "1,2", "invalid"])
+def test_missing_artifact_cannot_schedule_on_demand_download(filename, job, artifact):
+    expr = load_workflow(filename)["jobs"][job]["if"]
+    assert not workflow_condition(expr, artifact=artifact)
+    assert workflow_condition(expr, artifact=artifact, pr_mode=False)
+
+
+def test_immutable_artifact_handoff_contract():
+    workflow = load_workflow("build-ppu-wheels.yaml")
+    assert "artifact_id" in workflow["jobs"]["build"]["outputs"]
+    for job in ("pin-unit-tests", "smoke"):
+        call = workflow["jobs"][job]["with"]
+        assert "source.artifact.id" in call["build_artifact_id"]
+        assert "source.run_id" in call["build_run_id"]
+        assert call["execution_plan"] == "${{ inputs.execution_plan }}"
+    for filename, job in (
+        ("ppu-pin-ut.yaml", "pin-unit-tests"),
+        ("e2e-ppu.yaml", "e2e"),
+    ):
+        steps = load_workflow(filename)["jobs"][job]["steps"]
+        download = next(
+            s["with"] for s in steps if s.get("uses") == "actions/download-artifact@v4"
+        )
+        assert "inputs.build_artifact_id" in download["artifact-ids"]
+        assert "!inputs.pr_mode" in download["name"]
+        assert download["merge-multiple"] is True
+
+
+def test_shared_queue_preserves_three_pending_control_writes():
+    locks = [
+        load_workflow(file)["jobs"][job]["concurrency"]
+        for file, job in (
+            ("run-ci-command.yml", "command"),
+            ("ppu-pr-ci.yaml", "validate"),
+            ("ppu-ci-report.yml", "report"),
+        )
+    ]
+    for lock in locks:
+        assert lock["group"].startswith("ppu-control-pr-")
+        assert lock["cancel-in-progress"] is False
+        pending = []
+        for task in ("completed-report", "command", "validate"):
+            if lock.get("queue", "single") == "single":
+                pending.clear()
+            pending.append(task)
+        assert pending == ["completed-report", "command", "validate"]
+        assert lock["queue"] == "max"
+    entry = load_workflow("ppu-pr-ci.yaml")["concurrency"]
+    assert entry["queue"] == "max" and entry["cancel-in-progress"] is False
+    notify = load_workflow("notify-ci-authorized.yml")["jobs"]["notify"]
+    assert notify["concurrency"]["group"].startswith("ppu-notification-pr-")
+
+
+def test_classification_precedes_write_queue_with_separate_help():
+    workflow = load_workflow("run-ci-command.yml")
+    classify = workflow["jobs"]["classify"]
+    assert "concurrency" not in classify
+    assert classify["permissions"] == {"contents": "read"}
+    assert any("ppu_ci_command classify" in s.get("run", "") for s in classify["steps"])
+    command = workflow["jobs"]["command"]
+    assert command["needs"] == "classify"
+    assert command["if"] == "needs.classify.outputs.kind == 'command'"
+    help_job = workflow["jobs"]["help"]
+    assert help_job["if"] == "needs.classify.outputs.kind == 'help'"
+    assert "concurrency" not in help_job
+    assert help_job["permissions"] == {"contents": "read", "issues": "write"}
+
+
+def test_report_schedule_and_manual_reconcile_never_dispatch_ppu():
+    workflow = load_workflow("ppu-ci-report.yml")
+    assert workflow[True]["schedule"] == [{"cron": "*/10 * * * *"}]
+    assert set(workflow[True]["workflow_dispatch"]["inputs"]) == {"run_id"}
+    discover = workflow["jobs"]["identify"]
+    assert all(v == "read" for v in discover["permissions"].values())
+    report = workflow["jobs"]["report"]
+    assert report["strategy"]["fail-fast"] is False
+    assert "matrix.pr_number" in report["concurrency"]["group"]
+    for job in workflow["jobs"].values():
+        assert job["runs-on"] == "ubuntu-latest"
+        assert "uses" not in job
+        assert job["permissions"].get("actions") == "read"
+        assert "github.event.repository.default_branch" in job.get("if", discover["if"])
 
 
 def test_cpu_events_unchanged_and_token_is_read_only():

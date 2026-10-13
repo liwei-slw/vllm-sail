@@ -172,9 +172,11 @@ def test_e2e_workflow_only_exposes_model_smoke() -> None:
         "image",
         "pr_mode",
         "pr_head_sha",
+        "execution_plan",
+        "build_artifact_id",
     }
     assert set(workflow["jobs"]) == {"prepare", "e2e"}
-    assert "if" not in workflow["jobs"]["prepare"]
+    assert "!inputs.pr_mode" in workflow["jobs"]["prepare"]["if"]
     assert workflow["jobs"]["e2e"]["needs"] == "prepare"
     for marker in (
         "device_probe_only",
@@ -195,7 +197,20 @@ def test_e2e_workflow_pulls_wheels_by_run_id() -> None:
     assert "build_run_id:" in text
     assert "actions/download-artifact@v4" in text
     assert "run-id: ${{ inputs.build_run_id }}" in text
-    assert "ppu-wheels-${{ inputs.build_run_id }}" in text
+    workflow = yaml.safe_load(text)
+    download = next(
+        s["with"]
+        for s in workflow["jobs"]["e2e"]["steps"]
+        if s.get("uses") == "actions/download-artifact@v4"
+    )
+    assert (
+        download["name"]
+        == "${{ !inputs.pr_mode && format('ppu-wheels-{0}', inputs.build_run_id) || '' }}"
+    )
+    assert (
+        download["artifact-ids"]
+        == "${{ inputs.pr_mode && inputs.build_artifact_id || '' }}"
+    )
 
 
 def test_e2e_workflow_keeps_python_frontend_and_privileged() -> None:

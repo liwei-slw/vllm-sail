@@ -25,10 +25,14 @@ from scripts.ci.ppu_ci_common import (
     execution_identity,
     matching_runs,
     number,
+    pr_identity,
+    request_plan,
     request_record,
     require,
+    retry_plan,
     run_url,
     sha,
+    unique_execution,
 )
 
 COMMANDS = {"/ci run", "/ci run --allow-stale", "/ci retry", "/ci cancel"}
@@ -41,9 +45,43 @@ HELP = (
 )
 
 
+def command_line(body):
+    # Markdown 缩进代码块和多行内容不进入命令路径。
+    body = body.strip("\r\n")
+    if body.expandtabs(4).startswith("    ") or "\n" in body or "\r" in body:
+        return ""
+    return body.strip()
+
+
 def parse_command(body):
-    body = body.strip()
+    body = command_line(body)
     return body if body in COMMANDS else None
+
+
+def classify(event):
+    if (
+        event.get("action") != "created"
+        or "pull_request" not in event.get("issue", {})
+        or event.get("comment", {}).get("user", {}).get("type") != "User"
+    ):
+        return "ignore"
+    body = command_line(event["comment"]["body"])
+    if parse_command(body):
+        return "command"
+    return "help" if body == "/ci" or body.startswith("/ci ") else "ignore"
+
+
+def help_command(event, api):
+    if classify(event) != "help":
+        return
+    comment = api.get(f"issues/comments/{number(event['comment']['id'])}")
+    pr_number = number(event["issue"]["number"])
+    if (
+        comment == event["comment"]
+        and comment["issue_url"]
+        == f"https://api.github.com/repos/{api.repo}/issues/{pr_number}"
+    ):
+        reply(api, pr_number, "Unsupported CI command. " + HELP)
 
 
 def trusted(api, actor, configured):
@@ -100,7 +138,15 @@ def requests_for_head(api, pr):
             record = request_record(api, check)
             if record["pr_number"] == pr["number"]:
                 result.append((check, record))
-    return sorted(result, key=lambda item: item[1]["controller_run_id"], reverse=True)
+    return sorted(
+        result,
+        key=lambda item: (
+            item[1]["controller_run_id"],
+            item[1]["comment_id"],
+            item[0]["id"],
+        ),
+        reverse=True,
+    )
 
 
 def save_record(api, check, record, **updates):
@@ -133,6 +179,24 @@ def stable_pr(api, pr, actor, context):
     return current
 
 
+def require_no_automatic(api, pr):
+    for run in api.pages(
+        "actions/workflows/build-ppu-wheels.yaml/runs", "workflow_runs"
+    ):
+        active = (
+            run["event"] == "pull_request"
+            and run["status"] != "completed"
+            and run["repository"]["full_name"] == api.repo
+            and any(
+                p["number"] == pr["number"] and p["head"]["sha"] == pr["head"]["sha"]
+                for p in run.get("pull_requests", [])
+            )
+        )
+        require(
+            not active, f"Automatic PPU CI is already active: {run_url(api, run['id'])}"
+        )
+
+
 def run_command(api, pr, comment, context, command):
     existing = requests_for_head(api, pr)
     for check, record in existing:
@@ -150,32 +214,22 @@ def run_command(api, pr, comment, context, command):
             link = run_url(api, runs[0]["id"]) if runs else check["details_url"]
             reply(api, pr["number"], f"PPU CI is already queued or active: {link}")
             return
-    for run in api.pages(
-        "actions/workflows/build-ppu-wheels.yaml/runs?event=pull_request",
-        "workflow_runs",
-    ):
-        if (
-            run["event"] == "pull_request"
-            and run["status"] != "completed"
-            and run["repository"]["full_name"] == api.repo
-            and any(
-                p["number"] == pr["number"] and p["head"]["sha"] == pr["head"]["sha"]
-                for p in run.get("pull_requests", [])
-            )
-        ):
-            reply(
-                api,
-                pr["number"],
-                f"Automatic PPU CI is already active: {run_url(api, run['id'])}",
-            )
-            return
+    require_no_automatic(api, pr)
     behind = behind_base(api, pr)
     require(
         behind == 0 or command == "/ci run --allow-stale",
         "The PR is behind its base branch. Update it or explicitly use `/ci run --allow-stale`.",
     )
     stable_pr(api, pr, comment["user"]["login"], context)
+    create_request(api, pr, comment, context, command, behind=behind)
+
+
+def create_request(api, pr, comment, context, command, *, behind=0, retry=None):
     record = {
+        "schema": 2,
+        "pr_identity": pr_identity(pr),
+        "allow_stale": command == "/ci run --allow-stale",
+        "dispatch_state": "preparing",
         "repository": api.repo,
         "pr_number": pr["number"],
         "head_sha": sha(pr["head"]["sha"]),
@@ -186,34 +240,57 @@ def run_command(api, pr, comment, context, command):
         "comment_id": number(comment["id"]),
         "actor": comment["user"]["login"],
         "command": command,
-        "min_attempt": 1,
     }
-    check = api.post(
-        "check-runs",
-        {
-            "name": REQUEST_NAME,
-            "head_sha": record["head_sha"],
-            "status": "queued",
-            "external_id": f"ppu-ci-request:{record['controller_run_id']}:{record['comment_id']}",
-            "details_url": run_url(api, record["controller_run_id"]),
-            "output": {
-                "title": REQUEST_NAME,
-                "summary": json.dumps(record, sort_keys=True),
-            },
-        },
-    )
-    for name in CONTEXTS:
-        api.post(
+    if retry:
+        record.update(retry)
+    try:
+        check = api.post(
             "check-runs",
             {
-                "name": name,
+                "name": REQUEST_NAME,
                 "head_sha": record["head_sha"],
                 "status": "queued",
-                "external_id": f"ppu-ci:{check['id']}:{name}",
-                "details_url": check["details_url"],
+                "external_id": f"ppu-ci-request:{record['controller_run_id']}:{record['comment_id']}",
+                "details_url": run_url(api, record["controller_run_id"]),
+                "output": {
+                    "title": REQUEST_NAME,
+                    "summary": json.dumps(record, sort_keys=True),
+                },
             },
         )
+    except OSError:
+        # 请求写入可能成功，但此时确定尚未调用 dispatch；只恢复本次幂等身份。
+        for saved_check, saved in requests_for_head(api, pr):
+            if (
+                saved["controller_run_id"] == record["controller_run_id"]
+                and saved["comment_id"] == record["comment_id"]
+            ):
+                saved["dispatch_state"] = "rejected"
+                save_record(
+                    api, saved_check, saved, status="completed", conclusion="failure"
+                )
+        reply(
+            api,
+            pr["number"],
+            "Request preparation failed before dispatch; post a new command after resolving the API failure.",
+        )
+        return
+    sent = False
     try:
+        for name in CONTEXTS:
+            api.post(
+                "check-runs",
+                {
+                    "name": name,
+                    "head_sha": record["head_sha"],
+                    "status": "queued",
+                    "external_id": f"ppu-ci:{check['id']}:{name}",
+                    "details_url": check["details_url"],
+                },
+            )
+        record["dispatch_state"] = "uncertain"
+        save_record(api, check, record)
+        sent = True
         api.post(
             f"actions/workflows/{EXECUTOR}/dispatches",
             {
@@ -226,14 +303,52 @@ def run_command(api, pr, comment, context, command):
                 },
             },
         )
-    except OSError:
+    except OSError as error:
+        rejected = not sent or (
+            isinstance(error, HTTPError)
+            and error.code in {400, 401, 403, 404, 409, 422, 429}
+        )
+        if rejected:
+            record["dispatch_state"] = "rejected"
+            save_record(api, check, record, status="completed", conclusion="failure")
+            for status in checks(api, record["head_sha"]):
+                if (
+                    status.get("external_id")
+                    == f"ppu-ci:{check['id']}:{status['name']}"
+                    and status.get("app", {}).get("id") == ACTIONS_APP_ID
+                ):
+                    api.patch(
+                        f"check-runs/{status['id']}",
+                        {"status": "completed", "conclusion": "failure"},
+                    )
+            reply(
+                api,
+                pr["number"],
+                "Dispatch was not accepted; post a new command after resolving the API failure.",
+            )
+            return
+        try:
+            runs = matching_runs(api, check, record)
+        except OSError:
+            runs = []
+        if len(runs) == 1:
+            record["dispatch_state"] = "accepted"
+            save_record(api, check, record)
+            reply(
+                api,
+                pr["number"],
+                f"Dispatch confirmed after a lost response: {run_url(api, runs[0]['id'])}",
+            )
+            return
         reply(
             api,
             pr["number"],
-            "Dispatch acceptance is uncertain; the checks remain queued. "
-            f"A maintainer must confirm the run before retrying: {check['details_url']}",
+            "Dispatch acceptance is uncertain; checks remain queued. A maintainer must inspect and confirm whether it was received before cancelling and posting `/ci run`. "
+            + check["details_url"],
         )
         return
+    record["dispatch_state"] = "accepted"
+    save_record(api, check, record)
     warning = (
         f" Warning: this head is {behind} commits behind its base; merge protection is unchanged."
         if behind
@@ -290,101 +405,63 @@ def retry_or_cancel(api, pr, comment, context, command):
     if command == "/ci cancel":
         cancel_pr(api, pr, comment, context)
         return
+    require_no_automatic(api, pr)
     requests = requests_for_head(api, pr)
     require(requests, "No PPU execution exists for this head. Use `/ci run` first.")
-    check, record = requests[0]
-    runs = matching_runs(api, check, record)
-    require(
-        runs,
-        "The dispatch is still queued; confirm its status before sending another command.",
-    )
-    run = runs[0]
-    stable_pr(api, pr, comment["user"]["login"], context)
-    if comment["id"] in record.get("handled_comments", []):
+    if any(r["comment_id"] == comment["id"] for _, r in requests):
         return
-    require(
-        run["status"] == "completed"
-        and run["conclusion"]
-        in {"failure", "cancelled", "timed_out", "action_required", "startup_failure"},
-        f"No completed failed execution to retry: {run_url(api, run['id'])}",
-    )
-    link = run_url(api, run["id"])
-    require(
-        run["run_attempt"] >= record["min_attempt"],
-        f"A retry is pending or uncertain; a maintainer must inspect {link} before retrying. "
-        "If no rerun was accepted, use `/ci cancel` and then a new `/ci run`.",
-    )
-    statuses = bound_checks(api, check, record)
-    pending = {
-        **record,
-        "min_attempt": run["run_attempt"] + 1,
-        "run_id": run["id"],
-        "cancelled": False,
-        "retry_actor": comment["user"]["login"],
-        "handled_comments": [*record.get("handled_comments", []), comment["id"]],
-    }
-    sent = False
-    try:
-        save_record(api, check, pending, status="queued")
-        for status in statuses:
-            api.patch(f"check-runs/{status['id']}", {"status": "queued"})
-        sent = True
-        api.post(f"actions/runs/{run['id']}/rerun-failed-jobs")
-    except OSError as error:
-        # 未发送或被明确拒绝时才回滚；超时和服务端错误不能证明写入未生效。
-        rejected = isinstance(error, HTTPError) and error.code in {
-            400,
-            401,
-            403,
-            404,
-            409,
-            422,
-            429,
-        }
-        if not sent or rejected:
-            record["handled_comments"] = pending["handled_comments"]
-            save_record(api, check, record, status="completed", conclusion="failure")
-            for status in statuses:
-                api.patch(
-                    f"check-runs/{status['id']}",
-                    {"status": "completed", "conclusion": "failure"},
-                )
-            reply(
-                api,
-                pr["number"],
-                f"Retry was not accepted; post a new `/ci retry` after resolving the API failure. {link}",
-            )
-            return
-        try:
-            observed = api.get(f"actions/runs/{run['id']}")
-        except OSError:
-            observed = None
-        if observed is not None:
-            execution_identity(api, observed, check, pending)
-            if observed["run_attempt"] >= pending["min_attempt"]:
-                reply(
-                    api, pr["number"], f"Retry confirmed after a lost response: {link}"
-                )
-                return
-        reply(
-            api,
-            pr["number"],
-            f"Retry acceptance is uncertain; checks remain queued. A maintainer must inspect {link}. "
-            "If no rerun was accepted, use `/ci cancel` and then a new `/ci run`; do not blindly retry.",
+    source = None
+    for check, record in requests:
+        runs = matching_runs(api, check, record)
+        if record.get("dispatch_state") == "rejected" and not runs:
+            continue
+        require(
+            runs,
+            "Dispatch is pending or uncertain; inspect and confirm its status before `/ci cancel` and a new `/ci run`.",
         )
-        return
-    reply(api, pr["number"], f"Failed jobs queued for retry: {link}")
+        require(
+            all(r["status"] == "completed" for r in runs), "PPU CI is already active."
+        )
+        if source is None:
+            source = check, record, runs[0]
+    require(source, "No completed execution exists; use `/ci run`.")
+    check, record, run = source
+    require(
+        pr_identity(pr) == record["pr_identity"]
+        and context["control_sha"] == record["control_sha"]
+        and context["default_branch"] == record["default_branch"],
+        "PR head, base or control revision changed; use `/ci run`.",
+    )
+    require(
+        run["conclusion"] != "success" or check.get("conclusion") != "success",
+        "No completed failed execution to retry.",
+    )
+    plan = retry_plan(api, check, record, run)
+    require(
+        record["allow_stale"] or behind_base(api, pr) == 0,
+        "The PR is behind its base; use `/ci run`.",
+    )
+    stable_pr(api, pr, comment["user"]["login"], context)
+    create_request(
+        api,
+        pr,
+        comment,
+        context,
+        "/ci retry",
+        retry={
+            "retry_of_request_id": check["id"],
+            "retry_of_run_id": run["id"],
+            "retry_plan": plan,
+            "allow_stale": record["allow_stale"],
+        },
+    )
 
 
 def handle_event(event, api, context):
-    if event.get("action") != "created" or "pull_request" not in event.get("issue", {}):
+    if classify(event) != "command":
         return
     command = parse_command(event["comment"]["body"])
     pr_number = number(event["issue"]["number"])
-    if command is None:
-        if event["comment"]["body"].strip().startswith("/ci "):
-            reply(api, pr_number, "Unsupported CI command. " + HELP)
-        return
     try:
         comment = api.get(f"issues/comments/{number(event['comment']['id'])}")
         require(comment == event["comment"], "The comment changed; post a new command.")
@@ -439,33 +516,35 @@ def validate_execution(api, inputs, run, context):
         and context["default_branch"] == record["default_branch"],
         "Control revision changed.",
     )
-    runs = matching_runs(api, check, record)
-    require(
-        runs
-        and runs[0]["id"] == run["id"]
-        and record.get("run_id", run["id"]) == run["id"],
-        "A request cannot be replayed.",
-    )
+    unique_execution(api, check, record, run)
+    require(context["run_id"] == run["id"], "Validator run identity mismatch.")
     require(not record.get("cancelled"), "This request was cancelled.")
     require(
-        run["run_attempt"] >= record["min_attempt"], "This attempt has been superseded."
+        record.get("dispatch_state") in {"accepted", "uncertain"},
+        "Dispatch was not accepted.",
     )
     pr = api.get(f"pulls/{record['pr_number']}")
     require(
-        pr["head"]["sha"] == record["head_sha"]
-        and pr["base"]["sha"] == record["base_sha"],
+        pr_identity(pr) == record["pr_identity"],
         "PR head or base changed; send `/ci run` again.",
     )
-    actor = record.get("retry_actor", record["actor"])
+    latest = requests_for_head(api, pr)
+    require(
+        latest and latest[0][0]["id"] == check["id"],
+        "This request has been superseded.",
+    )
+    actor = record["actor"]
     authorize(api, pr, actor, context["trusted_users"])
     require(
-        record["command"] == "/ci run --allow-stale" or behind_base(api, pr) == 0,
+        record["allow_stale"] or behind_base(api, pr) == 0,
         "The PR is now behind its base branch.",
     )
+    plan = request_plan(api, check, record)
+    require_no_automatic(api, pr)
     stable_pr(api, pr, actor, context)
     bound_checks(api, check, record)
     record["run_id"] = run["id"]
-    record["validated"] = True
+    record["validation"] = {"run_id": run["id"], "run_attempt": 1, "plan": plan}
     save_record(api, check, record, status="in_progress")
     return record
 
@@ -493,11 +572,18 @@ def notify(event, api, context):
 
 
 def main():
-    api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
     with open(os.environ["GITHUB_EVENT_PATH"]) as stream:
         event = json.load(stream)
-    context = context_from_env(api)
     mode = sys.argv[1]
+    if mode == "classify":
+        with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
+            stream.write(f"kind={classify(event)}\n")
+        return
+    api = GitHub(os.environ["GITHUB_REPOSITORY"], os.environ["GH_TOKEN"])
+    if mode == "help":
+        help_command(event, api)
+        return
+    context = context_from_env(api)
     if mode == "command":
         handle_event(event, api, context)
     elif mode == "notify":
@@ -509,6 +595,7 @@ def main():
         with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
             stream.write(
                 f"head_sha={record['head_sha']}\npr_number={record['pr_number']}\n"
+                f"execution_plan={json.dumps(record['validation'], separators=(',', ':'))}\n"
             )
     else:
         raise Rejected("Unknown controller mode.")

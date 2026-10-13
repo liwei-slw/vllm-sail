@@ -8,6 +8,14 @@ name: E2E PPU smoke
 on:
   workflow_call:
     inputs:
+      execution_plan:
+        description: Hosted validator run-bound execution plan
+        type: string
+        default: ""
+      build_artifact_id:
+        description: Validated immutable wheel artifact ID
+        type: string
+        default: ""
       pr_mode:
         description: Enforce PR artifact identity for on-demand execution
         type: boolean
@@ -58,6 +66,10 @@ concurrency:
 
 jobs:
   prepare:
+    if: >-
+      !inputs.pr_mode || (github.run_attempt == 1 && inputs.build_artifact_id > 0 &&
+      fromJSON(inputs.execution_plan).run_id == github.run_id &&
+      fromJSON(inputs.execution_plan).plan.smoke.mode == 'run')
     name: Resolve model matrix
     runs-on: k8s-runner-group-cpu-thead
     timeout-minutes: 10
@@ -115,6 +127,10 @@ jobs:
         run: python3 scripts/ci/ppu_e2e_select.py "${MODELS}" >> "$GITHUB_OUTPUT"
 
   e2e:
+    if: >-
+      !inputs.pr_mode || (github.run_attempt == 1 && inputs.build_artifact_id > 0 &&
+      fromJSON(inputs.execution_plan).run_id == github.run_id &&
+      fromJSON(inputs.execution_plan).plan.smoke.mode == 'run')
     name: E2E ${{ matrix.model.key }}
     needs: prepare
     runs-on: k8s-runner-group-cpu-thead
@@ -169,7 +185,9 @@ jobs:
       - name: Download CI-built wheels
         uses: actions/download-artifact@v4
         with:
-          name: ppu-wheels-${{ inputs.build_run_id }}
+          name: ${{ !inputs.pr_mode && format('ppu-wheels-{0}', inputs.build_run_id) || '' }}
+          artifact-ids: ${{ inputs.pr_mode && inputs.build_artifact_id || '' }}
+          merge-multiple: true
           path: wheels
           run-id: ${{ inputs.build_run_id }}
           repository: ${{ github.repository }}

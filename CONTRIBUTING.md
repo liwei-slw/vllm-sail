@@ -95,7 +95,7 @@ Post one of these commands as the entire text of a **new PR comment**:
 | --- | --- |
 | `/ci run` | Build and test the current PR head using the existing PPU PR chain. |
 | `/ci run --allow-stale` | Run even if the head is behind its actual base branch; merge protection is unchanged. |
-| `/ci retry` | Retry failed jobs from an existing execution of the current head. Successful prerequisites may be reused. |
+| `/ci retry` | Create a new validated run for failed stages of the latest completed on-demand execution. Reuse proven successful stages only. |
 | `/ci cancel` | Cancel this PR's on-demand PPU requests, including older heads; CPU checks and other PRs are unaffected. |
 
 An ordinary author needs an open, non-Draft PR and either a `ready` or
@@ -104,7 +104,8 @@ review decision `APPROVED`. Historical or dismissed approvals do not authorize a
 run. Maintainers with `write`, `maintain` or `admin` permission, and users listed
 in the optional `CI_TRUSTED_USERS` repository variable (comma- or whitespace-
 separated GitHub logins), can run open PRs directly, including Drafts. Permissions
-are checked again when processing a command. `author_association` is not sufficient.
+are checked when processing a command and again in a GitHub-hosted validator
+before every new run, including retries. `author_association` is not sufficient.
 
 Adding a ready label only posts help; it does not launch tests. Approval is
 checked when a command is processed. `/ci run all`, `/ci run nightly`, edited
@@ -121,18 +122,48 @@ Once automatic PPU triggering is retired, a newly pushed head has missing /
 satisfy the new head's gate. Branch synchronization, approvals and required checks
 are never bypassed. The rollout still retains automatic PPU triggering for now.
 
-Commands are serialized per PR. A duplicate or active request returns its link.
+Retries use a new request and workflow run, not GitHub's native **Re-run**.
+Native reruns of `PPU PR CI` are rejected at the validator and actual job entry
+points; use `/ci retry`. Automatic PR and independent manual workflows keep their
+existing rerun behavior. Retries require unchanged head, base and control SHAs;
+if any changed, use `/ci run`. An original explicit `--allow-stale` authorization
+is preserved but does not relax any identity or permission check.
+
+If the build did not succeed, retry rebuilds and reruns both tests. Otherwise it
+reruns only unsuccessful pin UT / smoke stages. If only gate or reporting failed,
+all three heavy stages can be reused while validation and gate run again. Reuse
+requires real successful leaf jobs and a unique, unexpired build artifact bound
+to its original run, artifact ID and digest. Missing or changed artifacts require
+a fresh `/ci run`. Downloads use that exact ID and still verify the wheel manifest
+and file hashes. Reused check summaries link to the original run and job; they
+are not presented as new device measurements. Arbitrary skipped, missing,
+cancelled or timed-out required jobs cannot pass the gate.
+
+Command, validation and reporting writes share a serialized PR queue with
+`queue: max` and `cancel-in-progress: false`. At most 100 pending jobs can wait;
+additional jobs may be cancelled by GitHub. Ordinary comments and bot replies do
+not enter this queue. Unsupported-command help and label notifications use
+separate paths. A duplicate or active request returns its link.
+
 If dispatch acceptance is uncertain, checks remain queued: ask a maintainer to
-inspect the linked controller/executor run instead of repeatedly dispatching.
-A rejected retry or a failure before sending it restores a failed request so a
-new `/ci retry` can recover. A lost retry response is reconciled against the
-run's attempt number; if acceptance is still uncertain, no duplicate retry is
-sent. After a maintainer confirms that no rerun was accepted, `/ci cancel`
-invalidates the pending request and a new `/ci run` can start fresh.
-Cancellation invalidates the request before asking Actions to stop it. Missing,
-skipped, cancelled or timed-out required jobs cannot pass the gate. Reporter
-failures leave the gate non-successful; inspect the `PPU CI report` run and rerun
-that trusted reporting workflow after resolving the API failure.
+inspect the unique request/run title instead of repeatedly dispatching. A
+clearly rejected new request is marked failed without changing its source;
+a new comment can retry that source after the API problem is resolved. Lost
+responses are matched to a unique new run, never resent automatically. After a
+maintainer confirms that no run was accepted, `/ci cancel` invalidates the
+pending request and a new `/ci run` can start fresh. Cancellation invalidates the
+request before asking Actions to stop it.
+
+`PPU CI report` also reconciles unfinished terminal runs every ten minutes. It
+scans all executor pages and processes up to 100 outstanding reports, oldest
+first, per invocation; later invocations handle the remainder. GitHub schedules
+can be delayed, and the queue is not unlimited. Each repair reacquires the same
+PR lock and rechecks live request, run and evidence metadata. It never launches
+PPU work or resends uncertain dispatches. Old heads remain isolated, superseded
+requests cannot overwrite newer requests, and cancellation cannot become green.
+For API failures or interrupted reporting, use **Run workflow** on `PPU CI report`
+on the default branch, optionally supplying the executor `run_id` (blank scans
+unfinished reports). This reporting-only entry point does not rerun tests.
 
 ### Maintainer deployment checks
 
@@ -158,12 +189,17 @@ cache enforcement. Local CPU tests cannot establish platform or device success.
 After the switch, also verify that a new push does not start PPU work and that its
 head cannot reuse the old green checks. Keep all existing required checks.
 
-For workflow linting, actionlint 1.7.12 predates the official `cache-mode` key.
-Until actionlint supports it, the compatibility exception is restricted to
-`unexpected key "cache-mode" for "workflow" section`; the pipeline contract tests
-must still verify `none` and reusable-workflow propagation. Do not ignore other
-syntax errors or security findings. Existing self-hosted runner-label warnings
-may be configured separately.
+For workflow linting, actionlint 1.7.12 does not yet recognize the official
+`cache-mode` and `concurrency.queue` keys. Compatibility exceptions are restricted
+to `unexpected key "cache-mode" for "workflow" section` and
+`unexpected key "queue" for "concurrency" section`. Pipeline contract tests must
+still verify cache isolation, `queue: max`, shared lock identity and
+`cancel-in-progress: false`. GitHub forbids combining `queue: max` with
+`cancel-in-progress: true`; the automatic PR cancellation behavior is unchanged.
+See [GitHub concurrency syntax](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#concurrency).
+Do not ignore other syntax errors or security findings. Existing self-hosted
+runner-label warnings may be configured separately. Verify actual platform
+acceptance and queue recovery before retiring the automatic trigger.
 
 ## Reporting issues
 
