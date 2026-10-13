@@ -42,6 +42,7 @@ def test_defaults_and_canonical_snapshot() -> None:
     expected = {f"VLLM_SAIL_{key}": value for key, value in BOOL_DEFAULTS.items()}
     expected.update({f"VLLM_SAIL_{key}": None for key in BACKENDS})
     expected["VLLM_DEEPEPLL_RECV_HOOK"] = True
+    expected["PPU_SDK"] = "/usr/local/PPU_SDK"
     assert envs.snapshot() == expected
     assert set(envs.environment_variables) == set(expected)
     for suffix in (*BOOL_DEFAULTS, *BACKENDS):
@@ -131,6 +132,12 @@ def test_is_set_recognizes_either_name_even_when_empty(
     monkeypatch.setenv(f"{prefix}_{suffix}", "")
     assert envs.is_set(sail) is True
     assert envs.is_set(ppu) is True
+
+
+def test_sdk_path_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert envs.PPU_SDK == "/usr/local/PPU_SDK"
+    monkeypatch.setenv("PPU_SDK", "/opt/sail")
+    assert envs.PPU_SDK == "/opt/sail"
 
 
 def test_shared_upstream_variable_keeps_its_name(
