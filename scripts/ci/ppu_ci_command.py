@@ -431,7 +431,10 @@ def retry_or_cancel(api, pr, comment, context, command):
     source = None
     for check, record in requests:
         runs = matching_runs(api, check, record)
-        if record.get("dispatch_state") == "rejected" and not runs:
+        if not runs and (
+            record.get("dispatch_state") == "rejected"
+            or (source is not None and record.get("cancelled") is True)
+        ):
             continue
         require(
             runs,

@@ -924,6 +924,47 @@ def test_old_receipt_does_not_bypass_final_cancel_validation(
     )
 
 
+@pytest.mark.parametrize("lost_dispatch", [False, True])
+def test_retry_ignores_older_cancelled_request_without_run(
+    controller, api, context, lost_dispatch
+):
+    api.fail_dispatch = lost_dispatch
+    old = launch(controller, api, context)
+    next_comment(api, context, "/ci cancel")
+    controller.handle_event(event(api), api, context)
+    api.fail_dispatch = False
+    next_comment(api, context, "/ci run")
+    controller.handle_event(event(api), api, context)
+    source = latest_request(api)
+    executor(api, source).update(status="completed", conclusion="failure")
+    before = copy.deepcopy(api.checks)
+    dispatched = len(api.dispatches)
+    next_comment(api, context, "/ci retry")
+    controller.handle_event(event(api), api, context)
+    assert len(api.dispatches) == dispatched + 1
+    retry = json.loads(latest_request(api)["output"]["summary"])
+    assert retry["retry_of_request_id"] == source["id"] != old["id"]
+    assert {k: api.checks[k] for k in before} == before
+
+
+def test_latest_cancelled_no_run_does_not_revive_older_execution(
+    controller, api, context
+):
+    old = launch(controller, api, context)
+    executor(api, old).update(status="completed", conclusion="failure")
+    for check in api.checks.values():
+        check.update(status="completed", conclusion="failure")
+    next_comment(api, context, "/ci run")
+    controller.handle_event(event(api), api, context)
+    next_comment(api, context, "/ci cancel")
+    controller.handle_event(event(api), api, context)
+    before = copy.deepcopy(api.checks)
+    dispatched = len(api.dispatches)
+    next_comment(api, context, "/ci retry")
+    controller.handle_event(event(api), api, context)
+    assert len(api.dispatches) == dispatched and api.checks == before
+
+
 def test_retry_respects_revoked_authorization(controller, api, context):
     request = launch(controller, api, context)
     executor(api, request).update(status="completed", conclusion="failure")
