@@ -735,6 +735,65 @@ def test_control_workflows_only_execute_immutable_trusted_code(name):
         }
 
 
+@pytest.fixture
+def without_system_node(monkeypatch):
+    # Exercise the same missing-PATH condition as a fresh PPU worker.
+    monkeypatch.setenv("PATH", "")
+
+
+def test_node_runtime_is_a_pinned_dev_dependency():
+    from packaging.requirements import Requirement
+
+    requirements = (ROOT / "requirements/dev.txt").read_text().splitlines()
+    # This file also feeds setuptools' optional-dependencies.dev metadata.
+    parsed = [
+        Requirement(line) for line in requirements if line and not line.startswith("#")
+    ]
+    node = next(
+        requirement
+        for requirement in parsed
+        if requirement.name == "nodejs-wheel-binaries"
+    )
+    assert str(node.specifier) == "==24.19.0"
+
+
+def test_pin_ut_checks_node_after_installing_dev_dependencies():
+    text = (ROOT / "scripts/ci/ppu_pin_ut.sh").read_text()
+    install = text.index(
+        'python -m pip install --only-binary=nodejs-wheel-binaries -r "${ROOT_DIR}/requirements/dev.txt"'
+    )
+    preflight = text.index("python -m nodejs_wheel --version")
+    assert install < preflight < text.index("python -m pytest tests/ut")
+    result = subprocess.run(
+        [sys.executable, "-m", "nodejs_wheel", "--version"],
+        env={**os.environ, "PATH": ""},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "v24.19.0"
+
+
+@pytest.mark.usefixtures("without_system_node")
+def test_node_module_preserves_arguments_environment_and_exit_status():
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "nodejs_wheel",
+            "-e",
+            "console.log(process.argv[1]); console.error(process.env.PPU_NODE_TEST); process.exit(23);",
+            "argument with spaces",
+        ],
+        env={**os.environ, "PPU_NODE_TEST": "diagnostic"},
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 23, result.stderr
+    assert result.stdout.strip() == "argument with spaces"
+    assert result.stderr.strip() == "diagnostic"
+
+
 def workflow_condition(
     expression, *, pr_mode=True, attempt=1, plan=None, build="success", artifact="500"
 ):
@@ -769,7 +828,7 @@ def workflow_condition(
         + "));"
     )
     result = subprocess.run(
-        ["node", "-e", code, json.dumps(context)],
+        [sys.executable, "-m", "nodejs_wheel", "-e", code, json.dumps(context)],
         capture_output=True,
         text=True,
         check=True,
@@ -791,6 +850,7 @@ def workflow_condition(
         ("e2e-ppu.yaml", "e2e"),
     ],
 )
+@pytest.mark.usefixtures("without_system_node")
 def test_native_failed_rerun_cannot_schedule_any_on_demand_job(filename, job):
     expression = load_workflow(filename)["jobs"][job].get("if", "true")
     # 模拟成功 validate 被平台复用：所有后继仍必须独立拒绝 attempt 2。
@@ -800,6 +860,7 @@ def test_native_failed_rerun_cannot_schedule_any_on_demand_job(filename, job):
         assert workflow_condition(expression, pr_mode=False, attempt=2)
 
 
+@pytest.mark.usefixtures("without_system_node")
 def test_native_rerun_has_independent_hosted_rejection():
     job = load_workflow("ppu-pr-ci.yaml")["jobs"]["reject-native-rerun"]
     assert "needs" not in job and job["runs-on"] == "ubuntu-latest"
@@ -809,6 +870,7 @@ def test_native_rerun_has_independent_hosted_rejection():
 
 
 @pytest.mark.parametrize("stage,job", [("pin", "pin-unit-tests"), ("smoke", "smoke")])
+@pytest.mark.usefixtures("without_system_node")
 def test_retry_test_scheduling_requires_proven_build_reuse(stage, job):
     expr = load_workflow("build-ppu-wheels.yaml")["jobs"][job]["if"]
     plan = {s: {"mode": "run"} for s in ("build", "pin", "smoke")}
@@ -921,6 +983,7 @@ def test_pr_test_jobs_disable_cache_and_checkout_bound_sha(name):
     ],
 )
 @pytest.mark.parametrize("mode", [None, "", "read", "write", "none"])
+@pytest.mark.usefixtures("without_system_node")
 def test_cache_guard_checks_runner_injected_node_environment(filename, job_id, mode):
     steps = load_workflow(filename)["jobs"][job_id]["steps"]
     guard = next(s for s in steps if s.get("name") == "Require disabled cache access")
@@ -929,7 +992,7 @@ def test_cache_guard_checks_runner_injected_node_environment(filename, job_id, m
     if mode is not None:
         env["ACTIONS_CACHE_MODE"] = mode
     result = subprocess.run(
-        ["node", "-e", guard["with"]["script"]],
+        [sys.executable, "-m", "nodejs_wheel", "-e", guard["with"]["script"]],
         env=env,
         capture_output=True,
         text=True,
@@ -1136,6 +1199,7 @@ def test_gate_distinguishes_verified_reuse_from_skipped(tmp_path, mode, state):
     ],
 )
 @pytest.mark.parametrize("artifact", ["", "0", "1,2", "invalid"])
+@pytest.mark.usefixtures("without_system_node")
 def test_missing_artifact_cannot_schedule_on_demand_download(filename, job, artifact):
     expr = load_workflow(filename)["jobs"][job]["if"]
     assert not workflow_condition(expr, artifact=artifact)

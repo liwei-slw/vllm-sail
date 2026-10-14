@@ -18,8 +18,13 @@ python -m pytest tests/ut -q
 
 The package is imported directly from the checkout for these tests. The expected
 `vllm_sail._version is missing` warning can appear before the package is installed.
-Optional integration tests skip when their dependencies are unavailable. Node.js
-is also needed to test the JavaScript guards embedded in the CI workflows.
+Optional integration tests skip when their dependencies are unavailable.
+`requirements/dev.txt` installs a fixed Node.js binary wheel for testing the
+JavaScript guards embedded in the CI workflows. Tests invoke it through the
+current Python environment (`python -m nodejs_wheel`), so neither local nor PPU
+worker tests require a system `node` executable. The pin UT worker checks this
+runtime before running pytest; missing runtime dependencies fail rather than
+skip these tests.
 
 For native compilation or device testing, use the separate
 [PPU installation instructions](docs/getting_started/installation.md).
