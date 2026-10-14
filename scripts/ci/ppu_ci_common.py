@@ -369,6 +369,10 @@ def request_plan(api, check, record, seen=()):
         plan = retry_plan(api, source, original, run, (*seen, check["id"]))
         require(plan == record["retry_plan"], "Retry evidence changed; use `/ci run`.")
         return plan
+    except HTTPError as error:
+        if error.code in {404, 410}:
+            raise Rejected("Missing retry evidence; use `/ci run`.") from error
+        raise
     except (KeyError, TypeError) as error:
         raise Rejected("Missing retry evidence; use `/ci run`.") from error
 

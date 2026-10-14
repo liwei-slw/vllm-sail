@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 from urllib.error import HTTPError
 
 from scripts.ci.ppu_ci_command import requests_for_head, save_record
@@ -156,43 +157,151 @@ def finalized(api, run, check, record):
     )
 
 
-def discover(event, api):
-    # 只读发现；完整分页后按终止时间排序，不向设备派发，也不重发 uncertain 请求。
+class ReadBudget(Exception):
+    pass
+
+
+class DiscoveryAPI:
+    def __init__(self, api):
+        self.api = api
+        self.repo = api.repo
+        self.token = getattr(api, "token", "")
+        self.limit = 80
+        self.reads = 0
+        self.cache = {}
+
+    def consume(self):
+        if self.reads >= self.limit:
+            raise ReadBudget("Discovery read budget exhausted.")
+        self.reads += 1
+
+    def get(self, path, *, fresh=False):
+        if fresh or path not in self.cache:
+            self.consume()
+            self.cache[path] = self.api.get(path)
+        return self.cache[path]
+
+    pages = GitHub.pages
+
+
+def routing_identity(api, run_id):
+    run = api.get(f"actions/runs/{number(run_id)}")
+    title = TITLE.fullmatch(run.get("display_title", ""))
+    require(title, "Unexpected executor run title.")
+    check = api.get(f"check-runs/{number(title[3])}")
+    record = request_record(api, check)
+    execution_identity(api, run, check, record)
+    require(
+        record["default_branch"] == api.get("")["default_branch"]
+        and record.get("run_id", run["id"]) == run["id"],
+        "Execution routing identity changed.",
+    )
+    # Uniqueness and all write authorization are rechecked under the PR lock.
+    return run, check, record
+
+
+def scan_page(api, before):
+    def page(index, *, fresh=False):
+        data = api.get(
+            f"actions/workflows/{EXECUTOR}/runs?per_page=100&page={index}", fresh=fresh
+        )
+        runs = data["workflow_runs"]
+        ids = [number(run["id"]) for run in runs]
+        require(ids == sorted(set(ids), reverse=True), "Unordered executor listing.")
+        return data, runs
+
+    data, runs = page(1)
+    if before is None or not runs:
+        return runs
+    low, high = 1, max(1, (data["total_count"] + 99) // 100)
+    while low < high:
+        middle = (low + high) // 2
+        _, items = page(middle)
+        if not items or items[-1]["id"] < before:
+            high = middle
+        else:
+            low = middle + 1
+    _, runs = page(low)
+    # New arrivals can extend the tail beyond page one's cached total_count.
+    while runs and runs[-1]["id"] >= before:
+        low += 1
+        _, runs = page(low)
+    if low > 1 and (not runs or runs[0]["id"] < before):
+        # Deletions can move unseen older runs into the preceding page.
+        _, previous = page(low - 1, fresh=True)
+        require(
+            previous and previous[-1]["id"] >= before,
+            "Executor pagination changed; keep the checkpoint and retry.",
+        )
+    return [run for run in runs if run["id"] < before]
+
+
+def discover(event, api, cursor=None):
+    api = api if isinstance(api, DiscoveryAPI) else DiscoveryAPI(api)
     selected = event.get("workflow_run", {}).get("id") or event.get("inputs", {}).get(
         "run_id"
     )
     if selected:
-        run, _, record = identify({"workflow_run": {"id": number(selected)}}, api)
+        run, _, record = routing_identity(api, selected)
         return [{"pr_number": record["pr_number"], "run_id": run["id"]}]
-    runs = api.pages(f"actions/workflows/{EXECUTOR}/runs", "workflow_runs")
-    pending = sorted(
-        (r for r in runs if r["status"] == "completed"),
-        key=lambda r: (r.get("updated_at", ""), r["id"]),
-    )
-    targets, heads = [], {}
-    for run in pending:
-        try:
-            run, check, record = identify({"workflow_run": run}, api, runs)
-            key = (record["pr_number"], record["head_sha"])
-            if key not in heads:
-                heads[key] = requests_for_head(
-                    api, {"number": key[0], "head": {"sha": key[1]}}
-                )
-            latest = heads[key]
-            if not latest or latest[0][0]["id"] != check["id"]:
-                continue
-            if not finalized(api, run, check, record):
-                targets.append({"pr_number": record["pr_number"], "run_id": run["id"]})
-        except HTTPError as error:
-            if error.code not in {404, 410}:
-                raise
-            print(
-                f"Ignoring missing source for run {run['id']}: {error}", file=sys.stderr
-            )
-        except Rejected as error:
-            print(f"Ignoring untrusted run {run['id']}: {error}", file=sys.stderr)
-        if len(targets) == 100:
-            break
+    cursor = {} if cursor is None else cursor
+    before = cursor.get("before_run_id")
+    targets, inspected = [], 0
+    limit = api.limit
+    api.limit -= 8  # Reserve reads for checkpoint provenance after scanning.
+    try:
+        while inspected < 5 and api.reads + 8 < api.limit:
+            runs = scan_page(api, before)
+            if not runs:
+                before = None
+                break
+            for candidate in runs:
+                if inspected == 5 or api.reads + 8 >= api.limit:
+                    break
+                if candidate["status"] != "completed" or not TITLE.fullmatch(
+                    candidate.get("display_title", "")
+                ):
+                    before = candidate["id"]
+                    continue
+                inspected += 1
+                try:
+                    run, check, record = routing_identity(api, candidate["id"])
+                    target = {"pr_number": record["pr_number"], "run_id": run["id"]}
+                    try:
+                        latest = requests_for_head(
+                            api,
+                            {
+                                "number": record["pr_number"],
+                                "head": {"sha": record["head_sha"]},
+                            },
+                        )
+                        if (
+                            latest
+                            and latest[0][0]["id"] == check["id"]
+                            and not finalized(api, run, check, record)
+                        ):
+                            targets.append(target)
+                    except ReadBudget:
+                        # A costly optional probe must not starve older requests.
+                        targets.append(target)
+                except HTTPError as error:
+                    if error.code not in {404, 410}:
+                        raise
+                    print(
+                        f"Ignoring missing source for run {candidate['id']}: {error}",
+                        file=sys.stderr,
+                    )
+                except Rejected as error:
+                    print(
+                        f"Ignoring untrusted run {candidate['id']}: {error}",
+                        file=sys.stderr,
+                    )
+                before = candidate["id"]
+    except ReadBudget:
+        pass
+    finally:
+        api.limit = limit
+    cursor["before_run_id"] = before
     return targets
 
 
@@ -214,12 +323,34 @@ def main():
     with open(os.environ["GITHUB_EVENT_PATH"]) as stream:
         event = json.load(stream)
     if len(sys.argv) > 1 and sys.argv[1] == "discover":
-        targets = discover(event, api)
+        api = DiscoveryAPI(api)
+        selected = event.get("workflow_run", {}).get("id") or event.get(
+            "inputs", {}
+        ).get("run_id")
+        if selected:
+            targets = discover(event, api)
+        else:
+            from scripts.ci import ppu_ci_checkpoint
+
+            cursor = ppu_ci_checkpoint.restore(api)
+            targets = discover(event, api, cursor=cursor)
+            encoded = ppu_ci_checkpoint.encode(
+                api,
+                cursor,
+                number(os.environ["GITHUB_RUN_ID"]),
+                number(os.environ["GITHUB_RUN_ATTEMPT"]),
+                os.environ["GITHUB_WORKFLOW_SHA"],
+            )
+            path = Path(os.environ["CURSOR_FILE"])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(encoded)
         with open(os.environ["GITHUB_OUTPUT"], "a") as stream:
             stream.write(
                 f"matrix={json.dumps({'include': targets}, separators=(',', ':'))}\n"
             )
             stream.write(f"has_targets={str(bool(targets)).lower()}\n")
+            if not selected:
+                stream.write("cursor_written=true\n")
     elif os.environ.get("SOURCE_RUN_ID"):
         reconcile(api, os.environ["SOURCE_RUN_ID"], os.environ["REPORT_PR_NUMBER"])
     else:

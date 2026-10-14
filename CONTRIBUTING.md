@@ -163,16 +163,30 @@ heads even when an accepted or uncertain dispatch has no visible executor run.
 Keep these bot receipts while requests are pending; they are lookup hints, not
 authorization, and every discovered request is still verified against its PR.
 
-`PPU CI report` also reconciles unfinished terminal runs every ten minutes. It
-scans all executor pages and processes up to 100 outstanding reports, oldest
-first, per invocation; later invocations handle the remainder. GitHub schedules
-can be delayed, and the queue is not unlimited. Each repair reacquires the same
-PR lock and rechecks live request, run and evidence metadata. It never launches
-PPU work or resends uncertain dispatches. Old heads remain isolated, superseded
-requests cannot overwrite newer requests, and cancellation cannot become green.
+`PPU CI report` also reconciles unfinished terminal runs every ten minutes.
+Discovery has an 80-read API budget, including checkpoint lookup and download,
+and examines at most five on-demand candidates per invocation. It sweeps the
+unfiltered executor history from newer to older run IDs in resumable batches,
+then starts another sweep. New runs do not move an existing sweep back to the
+beginning; deleted run IDs do not invalidate its position. Later sweeps revisit
+failed or cancelled reports and check for partially written completion state.
+This is not a completion-time guarantee: GitHub schedules can be delayed, and
+both the discovery and per-PR queues have finite capacity.
+
+A small `ppu-report-cursor-v1` artifact stores the next position. Sweep writers
+are serialized separately from per-PR reporting. The checkpoint is a scheduling
+hint only: its reporting-workflow provenance is verified, its JSON is never
+executed, and it cannot authorize checks or PPU work. Missing or expired state
+restarts a sweep with a warning; transient API failures preserve the previous
+checkpoint. Failed uploads may repeat a batch. Event callbacks and explicit
+`run_id` repairs do not advance this checkpoint or wait behind sweep writers.
+Each repair reacquires the same PR lock and rechecks live request, run and
+evidence metadata without the discovery cache. It never launches PPU work or
+resends uncertain dispatches. Old heads remain isolated, superseded requests
+cannot overwrite newer requests, and cancellation cannot become green.
 For API failures or interrupted reporting, use **Run workflow** on `PPU CI report`
-on the default branch, optionally supplying the executor `run_id` (blank scans
-unfinished reports). This reporting-only entry point does not rerun tests.
+on the default branch, optionally supplying the executor `run_id` (blank resumes
+the sweep). This reporting-only entry point does not rerun tests.
 
 ### Maintainer deployment checks
 

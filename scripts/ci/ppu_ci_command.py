@@ -71,13 +71,22 @@ def classify(event):
     return "help" if body == "/ci" or body.startswith("/ci ") else "ignore"
 
 
+def same_comment(current, original):
+    return all(
+        current[key] == original[key]
+        for key in ("id", "issue_url", "body", "created_at", "updated_at")
+    ) and all(
+        current["user"][key] == original["user"][key] for key in ("id", "login", "type")
+    )
+
+
 def help_command(event, api):
     if classify(event) != "help":
         return
     comment = api.get(f"issues/comments/{number(event['comment']['id'])}")
     pr_number = number(event["issue"]["number"])
     if (
-        comment == event["comment"]
+        same_comment(comment, event["comment"])
         and comment["issue_url"]
         == f"https://api.github.com/repos/{api.repo}/issues/{pr_number}"
     ):
@@ -400,12 +409,16 @@ def cancel_pr(api, pr, comment, context):
         if check["status"] == "completed" and all(
             r["status"] == "completed" for r in runs
         ):
-            continue
-        if comment["id"] in record.get("handled_comments", []):
-            continue
+            # A cancelled request may still have partially written bound checks.
+            if not record.get("cancelled") or all(
+                status["status"] == "completed"
+                and status.get("conclusion") == "cancelled"
+                for status in bound_checks(api, check, record)
+            ):
+                continue
+        # The event receipt, not a partial request write, prevents comment replay.
         cancelled_any = True
         record["cancelled"] = True
-        record.setdefault("handled_comments", []).append(comment["id"])
         save_record(api, check, record, status="completed", conclusion="cancelled")
         for status in bound_checks(api, check, record):
             api.patch(
@@ -485,7 +498,10 @@ def handle_event(event, api, context):
     pr_number = number(event["issue"]["number"])
     try:
         comment = api.get(f"issues/comments/{number(event['comment']['id'])}")
-        require(comment == event["comment"], "The comment changed; post a new command.")
+        require(
+            same_comment(comment, event["comment"]),
+            "The comment changed; post a new command.",
+        )
         require(
             comment["issue_url"]
             == f"https://api.github.com/repos/{api.repo}/issues/{pr_number}"

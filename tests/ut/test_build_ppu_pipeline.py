@@ -1023,6 +1023,7 @@ def test_revision_guard_handles_checkout_ownership(
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env.update(
         HOME=str(tmp_path),
+        LC_ALL="C",
         GIT_CONFIG_NOSYSTEM="1",
         GIT_CONFIG_GLOBAL=os.devnull,
         GIT_AUTHOR_NAME="CI test",
@@ -1273,6 +1274,25 @@ def test_report_schedule_and_manual_reconcile_never_dispatch_ppu():
     assert set(workflow[True]["workflow_dispatch"]["inputs"]) == {"run_id"}
     discover = workflow["jobs"]["identify"]
     assert all(v == "read" for v in discover["permissions"].values())
+    assert discover["concurrency"]["cancel-in-progress"] is False
+    assert discover["concurrency"]["queue"] == "max"
+    group = discover["concurrency"]["group"]
+    assert "github.event_name == 'schedule'" in group
+    assert "inputs.run_id == ''" in group and "github.run_id" in group
+    identity = next(s for s in discover["steps"] if s.get("id") == "identity")
+    assert identity["env"]["GITHUB_WORKFLOW_SHA"] == "${{ github.workflow_sha }}"
+    assert (
+        identity["env"]["CURSOR_FILE"]
+        == "${{ runner.temp }}/ppu-report-cursor/cursor.json"
+    )
+    upload = next(
+        s for s in discover["steps"] if "upload-artifact@" in s.get("uses", "")
+    )
+    assert upload["if"] == "steps.identity.outputs.cursor_written == 'true'"
+    assert upload["with"]["name"] == "ppu-report-cursor-v1"
+    assert upload["with"]["path"] == identity["env"]["CURSOR_FILE"]
+    assert upload["with"]["if-no-files-found"] == "error"
+    assert "overwrite" not in upload["with"]
     report = workflow["jobs"]["report"]
     assert report["strategy"]["fail-fast"] is False
     assert "matrix.pr_number" in report["concurrency"]["group"]

@@ -46,7 +46,9 @@ class FakeGitHub:
         self.comment = {
             "id": 17,
             "body": "/ci run",
-            "user": {"login": "author", "type": "User"},
+            "created_at": "2026-10-13T08:00:00Z",
+            "updated_at": "2026-10-13T08:00:00Z",
+            "user": {"id": 1, "login": "author", "type": "User"},
             "issue_url": f"https://api.github.com/repos/{REPO}/issues/7",
         }
         self.permissions = {"author": "read", "maintainer": "write"}
@@ -238,7 +240,9 @@ def next_comment(api, context, body="/ci retry", actor="author"):
         "id": context["run_id"],
     }
     api.comment.update(
-        id=api.comment["id"] + 1, body=body, user={"login": actor, "type": "User"}
+        id=api.comment["id"] + 1,
+        body=body,
+        user={"id": 1 if actor == "author" else 2, "login": actor, "type": "User"},
     )
 
 
@@ -311,6 +315,93 @@ def test_help_does_not_authorize_or_touch_requests(controller, api, monkeypatch)
     )
     controller.help_command(event(api), api)
     assert "Unsupported" in api.messages[-1]["body"]
+    assert api.pr_reads == 0 and not api.checks and not api.dispatches
+
+
+@pytest.mark.parametrize("body", ["/ci run", "/ci run all"])
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"reactions": {"total_count": 1, "+1": 1}},
+        {"user": {"avatar_url": "https://avatars.githubusercontent.com/new"}},
+        {"user": {"site_admin": False, "gravatar_id": ""}},
+        {"author_association": "CONTRIBUTOR"},
+    ],
+)
+def test_comment_snapshot_ignores_irrelevant_metadata(
+    controller, api, context, body, metadata
+):
+    api.comment["body"] = body
+    ev = event(api)
+    if "user" in metadata:
+        api.comment["user"].update(metadata["user"])
+    else:
+        api.comment.update(metadata)
+    if body == "/ci run":
+        controller.handle_event(ev, api, context)
+        assert len(api.dispatches) == 1 and len(api.checks) == 5
+    else:
+        controller.help_command(ev, api)
+        assert len(api.messages) == 1 and "Unsupported" in api.messages[0]["body"]
+        assert api.pr_reads == 0 and not api.checks and not api.dispatches
+
+
+@pytest.mark.parametrize("body", ["/ci run", "/ci run all"])
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("id", 999),
+        ("issue_url", f"https://api.github.com/repos/{REPO}/issues/8"),
+        ("issue_url", "https://api.github.com/repos/other/repo/issues/7"),
+        ("body", "/ci cancel"),
+        ("created_at", "2026-10-13T09:00:00Z"),
+        ("updated_at", "2026-10-13T09:00:00Z"),
+        ("user.id", 999),
+        ("user.login", "maintainer"),
+        ("user.type", "Bot"),
+    ],
+)
+def test_comment_snapshot_rejects_edits_and_identity_changes(
+    controller, api, context, monkeypatch, body, field, value
+):
+    api.comment["body"] = body
+    ev = event(api)
+    if field.startswith("user."):
+        api.comment["user"][field.split(".")[1]] = value
+    else:
+        api.comment[field] = value
+    # An edit restored to its original body still has a different updated_at.
+    if field == "updated_at":
+        api.comment["body"] = "/ci cancel"
+        api.comment["body"] = ev["comment"]["body"]
+    original_get = api.get
+
+    def get_comment(path):
+        if path == f"issues/comments/{ev['comment']['id']}":
+            return copy.deepcopy(api.comment)
+        return original_get(path)
+
+    monkeypatch.setattr(api, "get", get_comment)
+    if body == "/ci run":
+        controller.handle_event(ev, api, context)
+        assert "comment changed" in api.messages[-1]["body"]
+    else:
+        controller.help_command(ev, api)
+        assert not api.messages
+    assert api.pr_reads == 0 and not api.checks and not api.dispatches
+
+
+@pytest.mark.parametrize("body", ["/ci run", "/ci run all"])
+def test_comment_snapshot_must_belong_to_event_issue(controller, api, context, body):
+    api.comment.update(
+        body=body, issue_url=f"https://api.github.com/repos/{REPO}/issues/8"
+    )
+    if body == "/ci run":
+        controller.handle_event(event(api), api, context)
+        assert "Invalid command source" in api.messages[-1]["body"]
+    else:
+        controller.help_command(event(api), api)
+        assert not api.messages
     assert api.pr_reads == 0 and not api.checks and not api.dispatches
 
 
@@ -902,6 +993,121 @@ def test_receipt_lookup_preserves_other_pr_and_completed_checks(
     assert api.checks[request["id"]]["conclusion"] == "success"
 
 
+@pytest.mark.parametrize("dispatch_state", ["accepted", "uncertain"])
+@pytest.mark.parametrize("run_state", [None, "in_progress", "completed"])
+@pytest.mark.parametrize("older_head", [False, True])
+@pytest.mark.parametrize("write_index", range(5))
+@pytest.mark.parametrize("applied", [False, True])
+def test_new_cancel_repairs_each_failed_check_write(
+    controller,
+    api,
+    context,
+    monkeypatch,
+    dispatch_state,
+    run_state,
+    older_head,
+    write_index,
+    applied,
+):
+    completed_request = launch(controller, api, context)
+    executor(api, completed_request, 199).update(
+        status="completed", conclusion="success"
+    )
+    for check in api.checks.values():
+        check.update(status="completed", conclusion="success")
+    completed = copy.deepcopy(api.checks)
+    next_comment(api, context, "/ci run")
+    api.fail_dispatch = dispatch_state == "uncertain"
+    controller.handle_event(event(api), api, context)
+    request = latest_request(api)
+    assert json.loads(request["output"]["summary"])["dispatch_state"] == dispatch_state
+    target_ids = [key for key in api.checks if key not in completed]
+    if run_state:
+        executor(api, request).update(status=run_state)
+    if older_head:
+        api.pr["head"]["sha"] = "d" * 40
+    original_patch, original_post = api.patch, api.post
+    failed, writes = [], []
+
+    def fail_once(path, payload):
+        writes.append(path)
+        if path == f"check-runs/{target_ids[write_index]}" and not failed:
+            failed.append(path)
+            if applied:
+                original_patch(path, payload)
+            raise OSError("cancel check write failed")
+        return original_patch(path, payload)
+
+    def cancel_only_after_invalidation(path, payload=None):
+        if path.endswith("/cancel"):
+            assert json.loads(api.checks[request["id"]]["output"]["summary"])[
+                "cancelled"
+            ]
+            assert all(
+                api.checks[key]["status"] == "completed"
+                and api.checks[key]["conclusion"] == "cancelled"
+                for key in target_ids
+            )
+        return original_post(path, payload)
+
+    monkeypatch.setattr(api, "patch", fail_once)
+    monkeypatch.setattr(api, "post", cancel_only_after_invalidation)
+    next_comment(api, context, "/ci cancel")
+    ev = event(api)
+    with pytest.raises(OSError, match="cancel check write failed"):
+        controller.handle_event(ev, api, context)
+    assert failed and not api.cancellations
+    assert {key: api.checks[key] for key in completed} == completed
+    partial, write_count = copy.deepcopy(api.checks), len(writes)
+    controller.handle_event(ev, api, context)
+    assert "already been processed" in api.messages[-1]["body"]
+    assert api.checks == partial and len(writes) == write_count
+    assert not api.cancellations
+
+    next_comment(api, context, "/ci cancel")
+    controller.handle_event(event(api), api, context)
+    assert all(
+        api.checks[key]["status"] == "completed"
+        and api.checks[key].get("conclusion") == "cancelled"
+        for key in target_ids
+    )
+    assert json.loads(api.checks[request["id"]]["output"]["summary"])["cancelled"]
+    assert {key: api.checks[key] for key in completed} == completed
+    assert api.cancellations == ([200] if run_state == "in_progress" else [])
+
+
+@pytest.mark.parametrize("applied", [False, True])
+def test_partial_cancel_is_not_completed_by_handled_comment(
+    controller, api, context, monkeypatch, applied
+):
+    request = launch(controller, api, context)
+    executor(api, request)
+    next_comment(api, context, "/ci cancel")
+    original_post = api.post
+    failed = []
+
+    def fail_cancel_once(path, payload=None):
+        if path.endswith("/cancel"):
+            saved = api.checks[request["id"]]
+            assert json.loads(saved["output"]["summary"])["cancelled"]
+            assert saved["status"] == "completed"
+            assert saved["conclusion"] == "cancelled"
+            if not failed:
+                failed.append(path)
+                if applied:
+                    original_post(path, payload)
+                raise OSError("Actions cancel response lost")
+        return original_post(path, payload)
+
+    monkeypatch.setattr(api, "post", fail_cancel_once)
+    with pytest.raises(OSError, match="Actions cancel response lost"):
+        controller.cancel_pr(api, api.pr, api.comment, context)
+    # Only the event receipt prevents replay; a partial record is not success.
+    controller.cancel_pr(api, api.pr, api.comment, context)
+    assert api.cancellations == [200] * (2 if applied else 1)
+    assert "Cancellation requested" in api.messages[-1]["body"]
+
+
 @pytest.mark.parametrize("mutation", ["head", "authorization", "provenance"])
 def test_old_receipt_does_not_bypass_final_cancel_validation(
     controller, api, context, mutation
@@ -987,7 +1193,7 @@ def test_retry_validator_uses_current_requester(
         )
     run.update(status="completed", conclusion="failure")
     api.comment.update(
-        id=18, body="/ci retry", user={"login": "maintainer", "type": "User"}
+        id=18, body="/ci retry", user={"id": 2, "login": "maintainer", "type": "User"}
     )
     controller.handle_event(event(api), api, context)
     assert not api.retries and len(api.dispatches) == 2

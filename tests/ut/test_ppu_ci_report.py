@@ -59,6 +59,30 @@ class ReportAPI(FakeGitHub):
         super().__init__()
         self.attempts = {1: jobs()}
         complete_jobs(self, {"id": 200})
+        self.reads = []
+
+    def get(self, path):
+        from urllib.parse import parse_qs
+
+        self.reads.append(path)
+        if "per_page=" in path:
+            route, query = path.split("?", 1)
+            params = parse_qs(query)
+            size = int(params["per_page"][0])
+            page = int(params.get("page", ["1"])[0])
+            if route.endswith("/runs"):
+                values = sorted(super().pages(route), key=lambda run: -run["id"])
+                key = "workflow_runs"
+            elif route.startswith("commits/"):
+                values = super().pages(route)
+                key = "check_runs"
+            else:
+                raise AssertionError(f"Unexpected paginated GET {path}")
+            return {
+                "total_count": len(values),
+                key: values[(page - 1) * size : page * size],
+            }
+        return super().get(path)
 
     def pages(self, path, key=None):
         if path.startswith("actions/runs/200/attempts/"):
@@ -152,6 +176,66 @@ def test_retry_reuses_successful_build_across_runs(reporter, setup):
     assert "/runs/200/job/2000" in build["output"]["summary"]
     assert "reuse" in build["output"]["summary"].lower()
     assert str(request["id"]) in build["output"]["summary"]
+
+
+@pytest.mark.parametrize("code", [404, 410, 503])
+@pytest.mark.parametrize("missing", ["run", "request", "jobs"])
+def test_missing_retry_source_finishes_failed_report(
+    reporter, setup, monkeypatch, code, missing
+):
+    from urllib.error import HTTPError
+
+    api, request, run, command, context = setup
+    run["conclusion"] = "failure"
+    api.attempts[1][2]["conclusion"] = "failure"
+    api.attempts[1][3]["conclusion"] = "failure"
+    reporter.report(snapshot(run), api)
+    next_comment(api, context)
+    command.handle_event(event(api), api, context)
+    second = executor(api, latest_request(api), 201)
+    validate(command, api, second, context)
+    api.job_runs[201] = jobs(run_id=201)[2:]
+    second.update(status="completed", conclusion="success")
+    original_get, original_pages = api.get, api.pages
+    path = {
+        "run": "actions/runs/200",
+        "request": f"check-runs/{request['id']}",
+        "jobs": "actions/runs/200/attempts/1/jobs",
+    }[missing]
+
+    def get(target):
+        if target == path:
+            raise HTTPError("https://api.github.com", code, "Unavailable", {}, None)
+        return original_get(target)
+
+    def pages(target, key=None):
+        if target == path:
+            raise HTTPError("https://api.github.com", code, "Unavailable", {}, None)
+        return original_pages(target, key)
+
+    monkeypatch.setattr(api, "get", get)
+    monkeypatch.setattr(api, "pages", pages)
+    if code == 503:
+        with pytest.raises(HTTPError):
+            reporter.reconcile(api, run_id=201, pr_number=7)
+        assert latest_request(api)["status"] == "in_progress"
+        assert gate(api)["status"] == "in_progress"
+        return
+    for _ in range(2):
+        reporter.reconcile(api, run_id=201, pr_number=7)
+        assert latest_request(api)["status"] == "completed"
+        assert gate(api)["conclusion"] == "failure"
+        assert "Missing retry evidence" in gate(api)["output"]["summary"]
+    assert reporter.finalized(
+        api,
+        second,
+        latest_request(api),
+        json.loads(latest_request(api)["output"]["summary"]),
+    )
+    dispatched = len(api.dispatches)
+    next_comment(api, context, "/ci run")
+    command.handle_event(event(api), api, context)
+    assert len(api.dispatches) == dispatched + 1
 
 
 def test_old_callback_cannot_complete_queued_retry(reporter, setup):
@@ -320,14 +404,9 @@ def test_reconcile_recovers_every_partial_report_write(
     assert len(api.dispatches) == 1 and not api.retries
 
 
-def test_discovery_scans_all_pages_and_drains_oldest_hundred(
-    reporter, setup, monkeypatch
-):
-    from scripts.ci.ppu_ci_common import GitHub
-
-    api, _, run, command, context = setup
-    run["updated_at"] = "2026-01-01T00:00:00Z"
-    for index in range(1, 105):
+def add_history(setup, count):
+    api, _, _, command, context = setup
+    for index in range(1, count):
         api.pr["head"]["sha"] = f"{index:040x}"
         api.comment["id"] += 1
         command.create_request(api, api.pr, api.comment, context, "/ci run")
@@ -338,41 +417,384 @@ def test_discovery_scans_all_pages_and_drains_oldest_hundred(
         )
         validate(command, api, other, context)
         api.job_runs[other["id"]] = jobs(run_id=other["id"])
-        other.update(
-            status="completed", conclusion="success", updated_at="2026-01-02T00:00:00Z"
-        )
-    runs = sorted(
-        (r for r in api.runs.values() if r["workflow_id"] == 20), key=lambda r: -r["id"]
-    )
-    original_pages = api.pages
-    pages_seen = []
+        other.update(status="completed", conclusion="success")
 
-    def get_page(path):
-        assert path.startswith(
-            "actions/workflows/ppu-pr-ci.yaml/runs?per_page=100&page="
-        )
-        page = int(path.rsplit("=", 1)[-1])
-        pages_seen.append(page)
-        return {"workflow_runs": copy.deepcopy(runs[(page - 1) * 100 : page * 100])}
 
-    def pages(path, key=None):
-        if path == "actions/workflows/ppu-pr-ci.yaml/runs":
-            from types import SimpleNamespace
-
-            return GitHub.pages(SimpleNamespace(get=get_page), path, key)
-        return original_pages(path, key)
-
-    monkeypatch.setattr(api, "pages", pages)
+def test_discovery_bounds_reads_and_resumes_past_finalized_history(reporter, setup):
+    api, _, run, _, _ = setup
+    add_history(setup, 101)
+    for run_id in range(201, 301):
+        reporter.reconcile(api, run_id=run_id, pr_number=7)
     before = copy.deepcopy(api.checks)
-    first = reporter.discover({}, api)
-    assert pages_seen[:2] == [1, 2]
+    cursor, visited = {}, []
+    for _ in range(30):
+        api.reads.clear()
+        targets = reporter.discover({}, api, cursor=cursor)
+        assert len(api.reads) <= 80
+        assert len(targets) <= 5
+        visited.extend(t["run_id"] for t in targets)
+        if cursor["before_run_id"] is None:
+            break
+    assert visited == [run["id"]]
     assert api.checks == before
-    assert [target["run_id"] for target in first] == list(range(200, 300))
-    for target in first:
-        reporter.reconcile(api, **target)
-    assert [target["run_id"] for target in reporter.discover({}, api)] == list(
-        range(300, 305)
+    assert len(api.dispatches) == 101 and not api.retries
+
+
+def test_discovery_drains_batches_and_revisits_failed_reports(reporter, setup):
+    api, _, _, _, _ = setup
+    add_history(setup, 16)
+    cursor, visited = {}, set()
+    for _ in range(6):
+        targets = reporter.discover({}, api, cursor=cursor)
+        assert len(targets) <= 5
+        visited.update(t["run_id"] for t in targets)
+        for target in targets:
+            if target["run_id"] != 210:
+                reporter.reconcile(api, **target)
+        if cursor["before_run_id"] is None:
+            break
+    assert visited == set(range(200, 216))
+    revisited = []
+    for _ in range(6):
+        revisited.extend(reporter.discover({}, api, cursor=cursor))
+        if cursor["before_run_id"] is None:
+            break
+    assert revisited == [{"pr_number": 7, "run_id": 210}]
+
+
+def test_discovery_survives_new_arrivals_deleted_anchor_and_thousand_runs(
+    reporter, setup
+):
+    api, _, original, _, _ = setup
+    for run_id in range(201, 1501):
+        api.runs[run_id] = {
+            **copy.deepcopy(original),
+            "id": run_id,
+            "display_title": "automatic",
+        }
+    cursor = {"before_run_id": 450}
+    del api.runs[450]
+    for run_id in range(1501, 1601):
+        api.runs[run_id] = {
+            **copy.deepcopy(original),
+            "id": run_id,
+            "display_title": "new arrival",
+        }
+    api.reads.clear()
+    assert reporter.discover({}, api, cursor=cursor) == [
+        {"pr_number": 7, "run_id": 200}
+    ]
+    assert cursor["before_run_id"] is None
+    assert len(api.reads) <= 80
+    pages = [p for p in api.reads if "/runs?" in p]
+    assert any(int(p.rsplit("=", 1)[-1]) > 10 for p in pages)
+    assert not any("created=" in p or "event=" in p or "status=" in p for p in pages)
+
+
+def test_arrivals_during_pagination_cannot_reset_an_unfinished_sweep(
+    reporter, setup, monkeypatch
+):
+    api, _, original_run, _, _ = setup
+    for run_id in range(201, 400):
+        api.runs[run_id] = {
+            **copy.deepcopy(original_run),
+            "id": run_id,
+            "display_title": "automatic",
+        }
+    original_get = api.get
+    inserts = 0
+
+    def get(path):
+        nonlocal inserts
+        result = original_get(path)
+        if path == "actions/workflows/ppu-pr-ci.yaml/runs?per_page=100&page=1":
+            start = max(api.runs) + 1
+            for run_id in range(start, start + 100):
+                api.runs[run_id] = {
+                    **copy.deepcopy(original_run),
+                    "id": run_id,
+                    "display_title": "concurrent arrival",
+                }
+            inserts += 1
+        return result
+
+    monkeypatch.setattr(api, "get", get)
+    cursor, found = {}, []
+    for _ in range(4):
+        api.reads.clear()
+        found.extend(reporter.discover({}, api, cursor=cursor))
+        assert len(api.reads) <= 80
+        if found:
+            break
+        assert cursor["before_run_id"] is not None
+    assert found == [{"pr_number": 7, "run_id": 200}]
+    assert inserts
+
+
+@pytest.mark.parametrize("empty_tail", [False, True])
+def test_deletion_during_pagination_preserves_the_unfinished_anchor(
+    reporter, setup, monkeypatch, empty_tail
+):
+    from scripts.ci.ppu_ci_common import Rejected
+
+    api, _, original_run, _, _ = setup
+    for run_id in range(201, 401):
+        api.runs[run_id] = {
+            **copy.deepcopy(original_run),
+            "id": run_id,
+            "display_title": "automatic",
+        }
+    if not empty_tail:
+        api.runs[199] = {
+            **copy.deepcopy(original_run),
+            "id": 199,
+            "display_title": "automatic",
+        }
+    original_get = api.get
+
+    def get(path):
+        result = original_get(path)
+        if path == "actions/workflows/ppu-pr-ci.yaml/runs?per_page=100&page=2":
+            api.runs.pop(400, None)
+        return result
+
+    monkeypatch.setattr(api, "get", get)
+    cursor = {"before_run_id": 201}
+    api.reads.clear()
+    with pytest.raises(Rejected, match="pagination changed"):
+        reporter.discover({}, api, cursor=cursor)
+    assert cursor == {"before_run_id": 201}
+    assert len(api.reads) <= 80
+    assert reporter.discover({}, api, cursor=cursor) == [
+        {"pr_number": 7, "run_id": 200}
+    ]
+    assert cursor["before_run_id"] is None
+
+
+def test_discovery_budget_covers_inner_pagination_without_stalling(
+    reporter, setup, monkeypatch
+):
+    api, _, _, _, _ = setup
+    original = api.get
+
+    def unbounded_checks(path):
+        if path.startswith("commits/"):
+            api.reads.append(path)
+            return {"check_runs": [copy.deepcopy(gate(api)) for _ in range(100)]}
+        return original(path)
+
+    monkeypatch.setattr(api, "get", unbounded_checks)
+    cursor = {}
+    api.reads.clear()
+    assert reporter.discover({}, api, cursor=cursor) == [
+        {"pr_number": 7, "run_id": 200}
+    ]
+    assert len(api.reads) <= 80
+    assert cursor["before_run_id"] == 200
+    assert reporter.discover({}, api, cursor=cursor) == []
+    assert cursor["before_run_id"] is None
+
+
+def test_selected_discovery_does_not_advance_cursor_or_list_history(reporter, setup):
+    api, _, _, _, _ = setup
+    cursor = {"before_run_id": 300}
+    api.reads.clear()
+    assert reporter.discover({"inputs": {"run_id": "200"}}, api, cursor=cursor) == [
+        {"pr_number": 7, "run_id": 200}
+    ]
+    assert cursor == {"before_run_id": 300}
+    assert not any("/runs?" in p for p in api.reads)
+
+
+def test_discovery_api_outage_keeps_previous_checkpoint(reporter, setup, monkeypatch):
+    from urllib.error import HTTPError
+
+    api, _, _, _, _ = setup
+    cursor = {"before_run_id": 300}
+    original = api.get
+
+    def unavailable(path):
+        if path.startswith("check-runs/"):
+            raise HTTPError("https://api.github.com", 503, "unavailable", {}, None)
+        return original(path)
+
+    monkeypatch.setattr(api, "get", unavailable)
+    with pytest.raises(HTTPError):
+        reporter.discover({}, api, cursor=cursor)
+    assert cursor == {"before_run_id": 300}
+
+
+def test_discovery_wrapper_bounds_all_reads_and_has_no_writes(reporter, setup):
+    api, _, _, _, _ = setup
+    bounded = reporter.DiscoveryAPI(api)
+    for _ in range(80):
+        bounded.consume()
+    with pytest.raises(reporter.ReadBudget):
+        bounded.get("")
+    assert bounded.reads == 80
+    assert not hasattr(bounded, "post") and not hasattr(bounded, "patch")
+
+
+@pytest.mark.parametrize("selected", [None, "manual", "callback"])
+@pytest.mark.parametrize("failure", [None, "restore", "encode"])
+def test_discovery_cli_persists_only_successful_sweeps(
+    setup, tmp_path, monkeypatch, selected, failure
+):
+    import sys
+    from types import SimpleNamespace
+
+    from scripts import ci
+    from scripts.ci import ppu_ci_report as module
+
+    api, _, run, _, _ = setup
+    calls = []
+
+    def restore(bounded):
+        assert isinstance(bounded, module.DiscoveryAPI)
+        calls.append("restore")
+        if failure == "restore":
+            raise OSError("Checkpoint API unavailable")
+        return {"before_run_id": 300}
+
+    def encode(bounded, cursor, run_id, attempt, sha):
+        assert bounded.reads <= 80
+        assert (run_id, attempt, sha) == (900, 1, CONTROL)
+        calls.append("encode")
+        if failure == "encode":
+            raise OSError("Checkpoint provenance unavailable")
+        return json.dumps(cursor)
+
+    checkpoint = SimpleNamespace(restore=restore, encode=encode)
+    monkeypatch.setattr(ci, "ppu_ci_checkpoint", checkpoint, raising=False)
+    monkeypatch.setattr(module, "GitHub", lambda *args: api)
+    monkeypatch.setattr(sys, "argv", ["ppu_ci_report", "discover"])
+    ev = {"schedule": "*/10 * * * *"}
+    if selected == "manual":
+        ev = {"inputs": {"run_id": "200"}}
+    elif selected == "callback":
+        ev = {"workflow_run": run}
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps(ev))
+    cursor_path = tmp_path / "checkpoint" / "cursor.json"
+    output = tmp_path / "output"
+    for key, value in {
+        "GITHUB_EVENT_PATH": event_path,
+        "GITHUB_OUTPUT": output,
+        "CURSOR_FILE": cursor_path,
+        "GITHUB_RUN_ID": "900",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_WORKFLOW_SHA": CONTROL,
+        "GITHUB_REPOSITORY": api.repo,
+        "GH_TOKEN": "test-token",
+    }.items():
+        monkeypatch.setenv(key, str(value))
+    if failure and selected is None:
+        with pytest.raises(OSError):
+            module.main()
+        assert not cursor_path.exists() and not output.exists()
+    else:
+        module.main()
+        assert "has_targets=true" in output.read_text()
+        if selected:
+            assert not calls and not cursor_path.exists()
+            assert "cursor_written=true" not in output.read_text()
+        else:
+            assert calls == ["restore", "encode"]
+            assert json.loads(cursor_path.read_text()) == {"before_run_id": None}
+            assert "cursor_written=true" in output.read_text()
+
+
+@pytest.mark.parametrize("warm", [False, True])
+def test_discovery_cli_uses_real_checkpoint_schema(setup, tmp_path, monkeypatch, warm):
+    import sys
+
+    from test_ppu_ci_checkpoint import archive
+
+    from scripts.ci import ppu_ci_checkpoint as checkpoint
+    from scripts.ci import ppu_ci_report as module
+
+    api, _, _, _, _ = setup
+    original = api.get
+    producer = {
+        "id": 900,
+        "run_attempt": 1,
+        "workflow_id": 30,
+        "path": ".github/workflows/ppu-ci-report.yml",
+        "event": "schedule",
+        "head_branch": "main",
+        "head_sha": CONTROL,
+        "repository": {"id": 2, "full_name": api.repo},
+        "head_repository": {"id": 2, "full_name": api.repo},
+    }
+    previous = {
+        "schema": 1,
+        "repository": api.repo,
+        "executor_workflow_id": 20,
+        "producer": {"run_id": 899, "attempt": 1, "control_sha": CONTROL},
+        "before_run_id": 300,
+    }
+    artifact = {
+        "id": 500,
+        "name": checkpoint.NAME,
+        "size_in_bytes": 400,
+        "expired": False,
+        "expires_at": "2999-01-01T00:00:00Z",
+        "workflow_run": {
+            "id": 899,
+            "repository_id": 2,
+            "head_repository_id": 2,
+            "head_sha": CONTROL,
+            "head_branch": "main",
+        },
+    }
+
+    def get(path):
+        response = None
+        if path == "":
+            response = {"id": 2, "full_name": api.repo, "default_branch": "main"}
+        elif path == "actions/workflows/ppu-ci-report.yml":
+            response = {"id": 30, "path": producer["path"]}
+        elif path in {"actions/runs/900", "actions/runs/899"}:
+            response = {**producer, "id": int(path.rsplit("/", 1)[-1])}
+        elif path.startswith("actions/artifacts?"):
+            response = {
+                "total_count": int(warm),
+                "artifacts": [artifact] if warm else [],
+            }
+        if response is not None:
+            api.reads.append(path)
+            return response
+        return original(path)
+
+    monkeypatch.setattr(api, "get", get)
+    monkeypatch.setattr(
+        checkpoint, "_download", lambda *args: archive(json.dumps(previous).encode())
     )
+    monkeypatch.setattr(module, "GitHub", lambda *args: api)
+    monkeypatch.setattr(sys, "argv", ["ppu_ci_report", "discover"])
+    event_path = tmp_path / "event.json"
+    event_path.write_text(json.dumps({"schedule": "*/10 * * * *"}))
+    cursor_path = tmp_path / "cursor.json"
+    output = tmp_path / "output"
+    for key, value in {
+        "GITHUB_EVENT_PATH": event_path,
+        "GITHUB_OUTPUT": output,
+        "CURSOR_FILE": cursor_path,
+        "GITHUB_RUN_ID": "900",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_WORKFLOW_SHA": CONTROL,
+        "GITHUB_REPOSITORY": api.repo,
+        "GH_TOKEN": "test-token",
+    }.items():
+        monkeypatch.setenv(key, str(value))
+    api.reads.clear()
+    module.main()
+    assert len(api.reads) <= 80
+    saved = json.loads(cursor_path.read_text())
+    assert saved["producer"] == {"run_id": 900, "attempt": 1, "control_sha": CONTROL}
+    assert saved["before_run_id"] is None
+    assert "has_targets=true" in output.read_text()
+    assert "cursor_written=true" in output.read_text()
 
 
 def test_repair_rechecks_supersession_and_lock_identity(reporter, setup):
