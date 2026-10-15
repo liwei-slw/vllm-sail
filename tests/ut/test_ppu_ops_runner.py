@@ -577,6 +577,10 @@ def test_execute_only_publishes_success_after_complete_evidence(
                 Path(kwargs["env"]["PPU_CI_OBSERVATION"]), observed
             )
             return subprocess.CompletedProcess(command, 0)
+        if command[1:3] == ["-m", "pytest"]:
+            effective_config = Path(command[command.index("--ppu-ci-config") + 1])
+            assert effective_config.parent == Path(kwargs["cwd"])
+            assert json.loads(effective_config.read_bytes())["test_catalog"] == entries
         completed = original_run(command, **kwargs)
         if failure == "missing-report" and "tests/e2e/test_first.py" in command:
             (output / "nodes/first.json").rename(output / "nodes/unexpected.json")

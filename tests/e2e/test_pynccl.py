@@ -19,6 +19,9 @@ import pytest
 
 pytestmark = pytest.mark.ppu
 
+# The current operator CI provisions one device; run this file manually on two.
+PPU_CI_MIN_DEVICES = 2
+
 
 def _load_runtime():
     import torch

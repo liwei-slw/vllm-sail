@@ -53,6 +53,113 @@ def test_real_config_and_full_routes(selector, config):
     assert selector.validate_environment(json.loads(ENVIRONMENT.read_text())) is False
 
 
+@pytest.fixture
+def discovered_config(config):
+    config["test_catalog"] = []
+    config["selection_rules"] = {
+        "full": {"paths": [], "prefixes": [], "globs": []},
+        "no_effect": {"paths": [], "prefixes": [], "globs": []},
+        "source_to_tests": [],
+    }
+    return config
+
+
+def add_device_test(repo, name, prefix=""):
+    path = repo / "tests/e2e" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(prefix + "\ndef test_device(): pass\n")
+    return path.relative_to(repo).as_posix()
+
+
+def test_new_files_are_discovered_without_json_or_imports(
+    selector, discovered_config, tmp_path
+):
+    file = add_device_test(
+        tmp_path, "nested/test_new_op.py", "raise RuntimeError('must not import')"
+    )
+    selector.validate_config(discovered_config, tmp_path)
+    result = selector.select_tests(discovered_config, [file], **OPTIONS)
+    assert result["mode"] == "subset" and result["files"] == [file]
+    entry = discovered_config["test_catalog"][0]
+    assert entry["id"].startswith("auto-")
+    assert entry["boards"] == ["ppu10", "ppu15"]
+    assert entry["requires"] == ["torch", "triton", "vllm", "vllm_sail"]
+    assert (
+        len(selector.route_tests(discovered_config, result["test_ids"])["groups"]) == 2
+    )
+    before = copy.deepcopy(discovered_config)
+    selector.validate_config(discovered_config, tmp_path)
+    assert discovered_config == before
+
+
+def test_discovery_preserves_explicit_board_and_dependency_overrides(
+    selector, discovered_config, tmp_path
+):
+    file = add_device_test(tmp_path, "test_custom.py")
+    entry = {
+        "id": "custom",
+        "test": file,
+        "boards": ["ppu15"],
+        "requires": ["deep_gemm", "torch", "triton", "vllm", "vllm_sail"],
+        "board_overrides": {},
+    }
+    discovered_config["test_catalog"] = [entry]
+    selector.validate_config(discovered_config, tmp_path)
+    assert discovered_config["test_catalog"] == [entry]
+
+
+def test_multi_device_files_are_reported_and_not_routed_to_single_device_ci(
+    selector, discovered_config, tmp_path, capsys
+):
+    single = add_device_test(tmp_path, "test_single.py")
+    multi = add_device_test(tmp_path, "test_communication.py", "PPU_CI_MIN_DEVICES = 2")
+    selector.validate_config(discovered_config, tmp_path)
+    assert [entry["test"] for entry in discovered_config["test_catalog"]] == [single]
+    output = capsys.readouterr().err
+    assert multi in output and "requires 2 devices" in output
+
+
+@pytest.mark.parametrize("value", ["True", "0", "-1", "'2'", "get_devices()"])
+def test_device_requirements_must_be_positive_integer_literals(
+    selector, discovered_config, tmp_path, value
+):
+    add_device_test(tmp_path, "test_invalid.py", f"PPU_CI_MIN_DEVICES = {value}")
+    with pytest.raises(ValueError, match="PPU_CI_MIN_DEVICES"):
+        selector.validate_config(discovered_config, tmp_path)
+
+
+def test_selection_and_validation_use_the_same_discovered_catalog(
+    selector, discovered_config, selection_inputs, tmp_path
+):
+    file = add_device_test(tmp_path, "test_new_op.py")
+    raw = json.dumps(discovered_config).encode()
+    inputs = {
+        **selection_inputs,
+        "config_bytes": raw,
+        "changes": {**selection_inputs["changes"], "paths": [file]},
+        "repo": tmp_path,
+    }
+    result = selector.make_selection(**inputs)
+    assert result["mode"] == "subset" and result["files"] == [file]
+    assert result["config_sha256"] == selector.checksum(raw)
+    selector.validate_selection(
+        result,
+        raw,
+        inputs["environment_bytes"],
+        tested_sha=inputs["changes"]["tested_sha"],
+        repo=tmp_path,
+        **{
+            key: inputs[key]
+            for key in (
+                "build_run_id",
+                "build_image",
+                "runtime_image",
+                "expected_vllm_commit",
+            )
+        },
+    )
+
+
 @pytest.mark.parametrize(
     "paths,mode,ids",
     [
@@ -140,7 +247,7 @@ def test_rejects_unsafe_paths(selector, config, path):
     "mutation",
     [
         lambda c: c.update(schema=True),
-        lambda c: c["test_catalog"].pop(),
+        lambda c: c["test_catalog"][0].update(test="tests/e2e/test_missing.py"),
         lambda c: c["test_catalog"].append(copy.deepcopy(c["test_catalog"][0])),
         lambda c: c["test_catalog"][0].update(boards=[]),
         lambda c: c["test_catalog"][0].update(boards=["unknown"]),
