@@ -33,9 +33,11 @@ def selector():
 
 
 @pytest.fixture
-def config():
+def config(selector):
     assert CONFIG.is_file(), "缺少正式测试目录"
-    return json.loads(CONFIG.read_text())
+    config = json.loads(CONFIG.read_text())
+    selector.discover_catalog(config, ROOT)
+    return config
 
 
 def test_real_config_and_full_routes(selector, config):
@@ -43,9 +45,12 @@ def test_real_config_and_full_routes(selector, config):
     result = selector.select_tests(config, ["csrc/unknown.cu"], **OPTIONS)
     assert result["mode"] == "full"
     assert "native_change" in result["reasons"]
-    assert len(result["test_ids"]) == 15
+    assert result["test_ids"] == sorted(t["id"] for t in config["test_catalog"])
     routes = selector.route_tests(config, result["test_ids"])
-    assert [len(g["files"]) for g in routes["groups"]] == [13, 14]
+    for group in routes["groups"]:
+        assert group["files"] == sorted(
+            t["test"] for t in config["test_catalog"] if group["board"] in t["boards"]
+        )
     assert routes["matrix"]["include"] == [
         {"group_id": b + "-0", "board": b, "nproc_per_node": 1}
         for b in ("ppu10", "ppu15")
