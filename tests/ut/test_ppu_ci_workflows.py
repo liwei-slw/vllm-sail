@@ -75,11 +75,44 @@ def test_notify_only_receives_label_events_with_minimum_permissions():
     assert config[True] == {"pull_request_target": {"types": ["labeled"]}}
     job = config["jobs"]["notify"]
     assert "ready-run-all-tests" in job["if"]
-    assert job["permissions"] == {
-        "contents": "read",
-        "issues": "write",
-        "pull-requests": "read",
-    }
+
+
+# GITHUB_TOKEN needs pull-requests: write to comment or react on a PR;
+# issues: write alone returns 403 "Resource not accessible by integration".
+@pytest.mark.parametrize(
+    "name,job_id,expected",
+    [
+        (
+            "run-ci-command.yml",
+            "command",
+            {
+                "contents": "read",
+                "actions": "write",
+                "issues": "write",
+                "pull-requests": "write",
+                "statuses": "write",
+            },
+        ),
+        (
+            "notify-ci-authorized.yml",
+            "notify",
+            {"contents": "read", "issues": "write", "pull-requests": "write"},
+        ),
+        (
+            "ppu-pr-ci.yaml",
+            "report",
+            {
+                "contents": "read",
+                "actions": "read",
+                "statuses": "write",
+                "issues": "write",
+                "pull-requests": "write",
+            },
+        ),
+    ],
+)
+def test_pr_commenting_jobs_can_write_pull_request_comments(name, job_id, expected):
+    assert workflow(name)["jobs"][job_id]["permissions"] == expected
 
 
 def test_executor_uses_only_dispatch_with_a_stable_request_identity():
