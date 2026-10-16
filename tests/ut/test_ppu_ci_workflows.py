@@ -376,3 +376,51 @@ def test_ops_partial_retry_downloads_diagnostics_from_successful_previous_attemp
             .replace("${{ github.run_attempt }}", "2")
         )
         assert downloaded == uploaded
+
+
+def scheduler_command(name):
+    for job in workflow(name)["jobs"].values():
+        for step in job.get("steps", []):
+            if "ppu-scheduler-action" in step.get("uses", ""):
+                return step["with"]["command"]
+    raise AssertionError(f"No scheduler step in {name}")
+
+
+# Privileged worker pods see every card on the host; without this binding the
+# runtime defaults to cards 0..N-1, which may belong to other jobs.
+@pytest.mark.parametrize(
+    "name,script",
+    [
+        ("e2e-ppu.yaml", "ppu_e2e_smoke.sh"),
+        ("ppu-pin-ut.yaml", "ppu_pin_ut.sh"),
+    ],
+)
+@pytest.mark.parametrize("allocated", ["3", "6,7", None])
+def test_device_workers_bind_allocated_cards_before_running(
+    tmp_path, name, script, allocated
+):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "bash"
+    fake.write_text(
+        '#!/bin/sh\nprintf "%s %s\\n" "${CUDA_VISIBLE_DEVICES-<unset>}" "$*"\n'
+    )
+    fake.chmod(0o755)
+    env = {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}", "CUDA_VISIBLE_DEVICES": "0,1"}
+    if allocated is not None:
+        env["NVIDIA_VISIBLE_DEVICES"] = allocated
+    command = scheduler_command(name).replace("/workspace/source", str(ROOT))
+    result = subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", command],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if allocated is None:
+        assert result.returncode != 0
+        assert "NVIDIA_VISIBLE_DEVICES" in result.stderr
+        assert result.stdout == ""
+    else:
+        assert result.returncode == 0, result.stderr
+        assert result.stdout == f"{allocated} scripts/ci/{script}\n"
