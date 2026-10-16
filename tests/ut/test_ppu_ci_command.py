@@ -20,6 +20,7 @@ ENV = {
     "GITHUB_SERVER_URL": "https://github.example",
     "GITHUB_RUN_ID": "900",
     "GITHUB_RUN_ATTEMPT": "2",
+    "GITHUB_SHA": "c" * 40,
     "CI_TRUSTED_USERS": "Trusted, OTHER\nthird",
 }
 PR = {
@@ -42,6 +43,13 @@ EVENT = {
 
 def module():
     return importlib.import_module("scripts.ci.ppu_ci_command")
+
+
+@pytest.fixture(autouse=True)
+def github_output(tmp_path, monkeypatch):
+    output = tmp_path / "github-output"
+    monkeypatch.setitem(ENV, "GITHUB_OUTPUT", str(output))
+    return output
 
 
 def http_error(code):
@@ -297,6 +305,7 @@ def run(ident=100, sha=SHA, status="completed", conclusion="failure", **extra):
         "head_branch": "main",
         "path": ".github/workflows/ppu-pr-ci.yaml",
         "repository": {"full_name": REPO},
+        "event": "workflow_dispatch",
         "status": status,
         "conclusion": conclusion,
         "run_attempt": 2,
@@ -805,6 +814,8 @@ def executor_setup(inputs=None, needs=None):
     gh.add("POST", ROOT + f"/statuses/{SHA}", {})
     gh.page(COMMENTS, [])
     gh.add("POST", ROOT + COMMENTS, {})
+    gh.add("GET", ROOT, {"default_branch": "main"})
+    gh.page(RUNS, [], "workflow_runs", event="workflow_dispatch", status="success")
     return control, gh, sleeps
 
 
@@ -1297,7 +1308,7 @@ def test_stdlib_only_python310_syntax_and_physical_line_budget():
     from pathlib import Path
 
     source = Path(module().__file__).read_text()
-    assert len(source.splitlines()) <= 540
+    assert len(source.splitlines()) <= 550
     tree = ast.parse(source, feature_version=(3, 10))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1309,101 +1320,331 @@ def test_stdlib_only_python310_syntax_and_physical_line_budget():
             assert node.module.split(".")[0] in sys.stdlib_module_names
 
 
-# -- CI-only build reuse --
+# Reuse is a trusted executor optimization, never a command/dispatch decision.
+
+
+def reuse_setup(files=None, candidates=None, compare=None):
+    control, gh, _ = executor_setup()
+    candidates = (
+        candidates if candidates is not None else [run(555, OLD, conclusion="success")]
+    )
+    gh.page(
+        RUNS, candidates, "workflow_runs", event="workflow_dispatch", status="success"
+    )
+    for candidate in candidates:
+        gh.page(
+            f"/actions/runs/{candidate['id']}/artifacts",
+            [{"name": f"ppu-wheels-{candidate['id']}", "expired": False}],
+            "artifacts",
+        )
+    gh.add(
+        "GET",
+        ROOT + f"/compare/{OLD}...{SHA}",
+        compare
+        if compare is not None
+        else {
+            "status": "ahead",
+            "merge_base_commit": {"sha": OLD},
+            "files": files if files is not None else [{"filename": "docs/guide.rst"}],
+        },
+    )
+    return control, gh
+
+
+def validate_pair(control, gh, github_output):
+    control.validate()
+    assert states(gh) == ["pending"]
+    assert not any("/files" in c[1] for c in gh.calls)
+    assert not any(
+        "/pulls/" in c[1] and not c[1].endswith("/pulls/7") for c in gh.calls
+    )
+    assert all(c[0] == "GET" or "/statuses/" in c[1] for c in gh.calls)
+    assert github_output.exists(), "validate must emit the trusted reuse pair"
+    return dict(line.split("=", 1) for line in github_output.read_text().splitlines())
+
+
+def test_command_does_not_inspect_files_or_choose_reuse():
+    control, gh, _ = command_setup(value="write", existing=[run()])
+    control.command()
+    assert gh.writes(DISPATCH)[0][2]["inputs"] == INPUTS
+    assert not any(
+        "/files" in c[1] or c[3].get("status") == "success" for c in gh.calls
+    )
+    assert "reused" not in reply(gh).lower()
 
 
 @pytest.mark.parametrize(
-    "files,expected",
+    "extra",
     [
-        ([".github/workflows/x.yaml", "CONTRIBUTING.md", "tests/ut/t.py"], True),
-        (["docs/README.md", "AGENTS.md"], True),
-        (["csrc/kernel.cu", ".github/workflows/x.yaml"], False),
-        (["vllm_sail/patch/foo.py"], False),
-        (["setup.py"], False),
-        (["plugin/hooks.py"], False),
-        (["requirements/dev.txt"], False),
-        (["CMakeLists.txt"], False),
-        (["pyproject.toml"], False),
-        ([], True),
+        {"existing_build_run_id": "555"},
+        {"wheel_source_sha": OLD},
+        {"unexpected": ""},
     ],
 )
-def test_ci_only_detection(files, expected):
-    assert module().Controller._ci_only(files) is expected
+@pytest.mark.parametrize("mode", ["validate", "report"])
+def test_executor_rejects_forged_extra_inputs_before_apis(extra, mode, github_output):
+    control, gh, _ = executor_setup({**INPUTS, **extra})
+    with pytest.raises(module().Rejected):
+        getattr(control, mode)()
+    assert gh.calls == []
+    assert not github_output.exists()
 
 
-def test_dispatch_reuses_build_for_ci_only_changes():
-    control, gh, _ = command_setup(login="maintainer", value="write", existing=[run()])
-    # Mock /pulls/7/files returning only CI/test/doc files
-    gh.page(
-        "/pulls/7/files",
+@pytest.mark.parametrize(
+    "files",
+    [
+        [],
+        [{"filename": "docs/guide.rst"}],
+        [{"filename": "tests/ut/test.py"}],
+        [{"filename": ".github/workflows/build-ppu-wheels.yaml"}],
+        [{"filename": "scripts/ci/ppu_ci_command.py"}],
         [
-            {"filename": ".github/workflows/x.yaml"},
-            {"filename": "tests/ut/y.py"},
-            {"filename": "CONTRIBUTING.md"},
+            {
+                "filename": "docs/new",
+                "previous_filename": "tests/old",
+                "status": "renamed",
+            }
         ],
+    ],
+)
+def test_validate_reuses_proven_source_not_workflow_sha(files, github_output, capsys):
+    control, gh = reuse_setup(files=files)
+    assert validate_pair(control, gh, github_output) == {
+        "existing_build_run_id": "555",
+        "wheel_source_sha": OLD,
+    }
+    calls = [c[1] for c in gh.calls]
+    assert ROOT + f"/compare/{OLD}...{SHA}" in calls
+    assert calls.index(ROOT + "/collaborators/author/permission") < calls.index(
+        ROOT + RUNS
     )
-    # Mock workflow runs search returning a successful main build
-    gh.add(
-        "GET",
-        ROOT + "/actions/workflows/ppu-pr-ci.yaml/runs",
+    logs = capsys.readouterr().out
+    assert "555" in logs and OLD in logs
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "README.md",
+        "LICENSE",
+        "MANIFEST.in",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "setup.py",
+        "pyproject.toml",
+        "CMakeLists.txt",
+        "csrc/kernel.cu",
+        "vllm_sail/file.py",
+        "plugin/hooks.py",
+        "cmake/build.cmake",
+        "requirements/dev.txt",
+        ".github/vllm-main-verified.commit",
+        "scripts/ci/build_ppu_wheels.sh",
+        "scripts/ci/ppu_image_stack.py",
+        "scripts/ci/ppu_wheel_manifest.py",
+        "unknown/file",
+        "scripts/ci/ppu_ci_command.py.bak",
+    ],
+)
+@pytest.mark.parametrize("rename", [False, True])
+def test_unknown_or_wheel_inputs_in_either_rename_path_build(
+    path, rename, github_output
+):
+    file = {"filename": path}
+    if rename:
+        file = {"filename": "docs/new", "previous_filename": path, "status": "renamed"}
+    control, gh = reuse_setup(files=[file])
+    assert validate_pair(control, gh, github_output) == {
+        "existing_build_run_id": "",
+        "wheel_source_sha": "",
+    }
+
+
+@pytest.mark.parametrize(
+    "compare",
+    [
+        {},
+        {"status": "ahead", "files": []},
+        {"status": "diverged", "merge_base_commit": {"sha": OLD}, "files": []},
+        {"status": "behind", "merge_base_commit": {"sha": OLD}, "files": []},
+        {"status": "ahead", "merge_base_commit": {"sha": SHA}, "files": []},
+        {"status": "ahead", "merge_base_commit": {"sha": OLD}},
+        {"status": "ahead", "merge_base_commit": {"sha": OLD}, "files": None},
+        {"status": "ahead", "merge_base_commit": {"sha": OLD}, "files": "docs/a"},
+        {"status": "ahead", "merge_base_commit": {"sha": OLD}, "files": [{}]},
         {
-            "workflow_runs": [
-                {
-                    "id": 555,
-                    "path": ".github/workflows/ppu-pr-ci.yaml",
-                    "head_branch": "main",
-                    "conclusion": "success",
-                    "repository": {"full_name": REPO},
-                },
-            ]
+            "status": "ahead",
+            "merge_base_commit": {"sha": OLD},
+            "files": [{"filename": "docs/new", "status": "renamed"}],
         },
-        params={
-            "per_page": 100,
-            "page": 1,
-            "event": "workflow_dispatch",
-            "status": "success",
+        {
+            "status": "ahead",
+            "merge_base_commit": {"sha": OLD},
+            "files": [{"filename": "docs/a"}] * 300,
         },
+        http_error(500),
+    ],
+)
+def test_unusable_truncated_or_nonancestor_compare_builds(compare, github_output):
+    control, gh = reuse_setup(compare=compare)
+    assert validate_pair(control, gh, github_output) == {
+        "existing_build_run_id": "",
+        "wheel_source_sha": "",
+    }
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"head_sha": "d" * 40},
+        {"head_sha": None},
+        {"head_branch": "feature"},
+        {"event": "pull_request"},
+        {"path": ".github/workflows/other.yaml"},
+        {"repository": {"full_name": "fork/repo"}},
+        {"display_title": "bad"},
+        {"status": "in_progress"},
+        {"conclusion": "failure"},
+    ],
+)
+def test_validate_only_reuses_successful_trusted_executors(extra, github_output):
+    control, gh = reuse_setup(
+        candidates=[run(555, OLD, **{"conclusion": "success", **extra})]
     )
-    control.command()
-    dispatch = gh.writes(DISPATCH)[0]
-    assert dispatch[2]["inputs"]["existing_build_run_id"] == "555"
-    assert "Wheels reused from main build" in reply(gh)
+    assert validate_pair(control, gh, github_output) == {
+        "existing_build_run_id": "",
+        "wheel_source_sha": "",
+    }
+    assert not any("/compare/" in c[1] or "/artifacts" in c[1] for c in gh.calls)
 
 
-def test_dispatch_full_build_for_code_changes():
-    control, gh, _ = command_setup(login="maintainer", value="write", existing=[run()])
+@pytest.mark.parametrize(
+    "same_source,code_changed", [(False, False), (False, True), (True, False)]
+)
+def test_other_pr_needs_actual_immutable_source_equivalence(
+    same_source, code_changed, github_output
+):
+    source = SHA if same_source else OLD
+    candidate = run(
+        555,
+        conclusion="success",
+        display_title=f"PPU PR #8 @ {source} by other (comment 43)",
+    )
+    control, gh = reuse_setup(
+        candidates=[candidate],
+        files=[{"filename": "csrc/new.cu" if code_changed else "tests/new.py"}],
+    )
+    pair = validate_pair(control, gh, github_output)
+    assert pair == {
+        "existing_build_run_id": "" if code_changed else "555",
+        "wheel_source_sha": "" if code_changed else source,
+    }
+
+
+@pytest.mark.parametrize(
+    "artifacts",
+    [
+        [],
+        [{"name": "ppu-wheels-555", "expired": True}],
+        [{"name": "ppu-wheels-554", "expired": False}],
+        [{"name": "ppu-wheels-555"}],
+    ],
+)
+def test_missing_deleted_expired_or_reuse_only_run_falls_back_to_real_producer(
+    artifacts, github_output
+):
+    control, gh = reuse_setup(
+        candidates=[
+            run(555, OLD, conclusion="success"),
+            run(554, OLD, conclusion="success"),
+        ]
+    )
+    gh.page("/actions/runs/555/artifacts", artifacts, "artifacts")
+    assert validate_pair(control, gh, github_output) == {
+        "existing_build_run_id": "554",
+        "wheel_source_sha": OLD,
+    }
+
+
+def test_reuse_artifacts_are_paginated(github_output):
+    control, gh = reuse_setup()
     gh.page(
-        "/pulls/7/files",
-        [{"filename": "csrc/kernel.cu"}, {"filename": ".github/workflows/x.yaml"}],
+        "/actions/runs/555/artifacts",
+        [{"name": "irrelevant", "expired": False}] * 100,
+        "artifacts",
     )
-    control.command()
-    dispatch = gh.writes(DISPATCH)[0]
-    assert "existing_build_run_id" not in dispatch[2]["inputs"]
-    assert "Wheels reused" not in reply(gh)
-
-
-def test_dispatch_full_build_when_no_reusable_main_build():
-    control, gh, _ = command_setup(login="maintainer", value="write", existing=[run()])
-    gh.page("/pulls/7/files", [{"filename": "CONTRIBUTING.md"}])
-    gh.add(
-        "GET",
-        ROOT + "/actions/workflows/ppu-pr-ci.yaml/runs",
-        {"workflow_runs": []},
-        params={
-            "per_page": 100,
-            "page": 1,
-            "event": "workflow_dispatch",
-            "status": "success",
-        },
+    gh.page(
+        "/actions/runs/555/artifacts",
+        [{"name": "ppu-wheels-555", "expired": False}],
+        "artifacts",
+        page=2,
     )
-    control.command()
-    dispatch = gh.writes(DISPATCH)[0]
-    assert "existing_build_run_id" not in dispatch[2]["inputs"]
+    assert validate_pair(control, gh, github_output)["existing_build_run_id"] == "555"
+    assert any(c[1].endswith("/artifacts") and c[3]["page"] == 2 for c in gh.calls)
 
 
-def test_dispatch_survives_file_list_api_failure():
-    control, gh, _ = command_setup(login="maintainer", value="write", existing=[run()])
-    gh.add("GET", ROOT + "/pulls/7/files", http_error(500))
-    control.command()
-    dispatch = gh.writes(DISPATCH)[0]
-    assert "existing_build_run_id" not in dispatch[2]["inputs"]
+@pytest.mark.parametrize("stage", ["runs", "artifacts", "compare"])
+def test_reuse_api_failure_logs_and_builds_not_optimistic_reuse(
+    stage, github_output, capsys
+):
+    control, gh = reuse_setup()
+    if stage == "runs":
+        gh.page(RUNS, http_error(503), event="workflow_dispatch", status="success")
+    elif stage == "artifacts":
+        gh.page("/actions/runs/555/artifacts", http_error(503))
+    else:
+        gh.add("GET", ROOT + f"/compare/{OLD}...{SHA}", http_error(503))
+    assert validate_pair(control, gh, github_output) == {
+        "existing_build_run_id": "",
+        "wheel_source_sha": "",
+    }
+    logs = capsys.readouterr()
+    assert "503" in logs.err
+    assert "full build" in logs.out.lower()
+
+
+def test_reuse_candidates_paginate_and_bound_expensive_selection(github_output):
+    control, gh = reuse_setup()
+    gh.page(
+        RUNS,
+        [
+            run(i, OLD, conclusion="success", display_title="unrelated")
+            for i in range(100)
+        ],
+        "workflow_runs",
+        event="workflow_dispatch",
+        status="success",
+    )
+    gh.page(
+        RUNS,
+        [run(555, OLD, conclusion="success")],
+        "workflow_runs",
+        page=2,
+        event="workflow_dispatch",
+        status="success",
+    )
+    assert validate_pair(control, gh, github_output)["existing_build_run_id"] == "555"
+
+    github_output.unlink()
+    control, gh = reuse_setup(
+        candidates=[run(i, OLD, conclusion="success") for i in range(530, 551)]
+    )
+    for i in range(531, 551):
+        gh.page(f"/actions/runs/{i}/artifacts", [], "artifacts")
+    assert validate_pair(control, gh, github_output)["existing_build_run_id"] == ""
+    assert len([c for c in gh.calls if c[1].endswith("/artifacts")]) == 20
+
+
+def test_reuse_discovery_has_a_finite_page_budget(github_output):
+    control, gh = reuse_setup(candidates=[])
+    for page in range(1, 11):
+        gh.page(
+            RUNS,
+            [run(i, display_title="unrelated") for i in range(100)],
+            "workflow_runs",
+            page=page,
+            event="workflow_dispatch",
+            status="success",
+        )
+    assert validate_pair(control, gh, github_output)["existing_build_run_id"] == ""
+    assert len([c for c in gh.calls if c[1] == ROOT + RUNS]) <= 10

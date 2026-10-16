@@ -17,12 +17,6 @@ HELP = "Commands: " + ", ".join(f"`{command}`" for command in COMMANDS)
 READY = {"ready", "ready-run-all-tests"}
 WRITE = {"write", "maintain", "admin"}
 WORKFLOW = "ppu-pr-ci.yaml"
-BUILD_DIRS = (
-    "csrc/", "vllm_sail/", "plugin/", "setup.py", "pyproject.toml",
-    "CMakeLists.txt", "requirements/", "cmake/",
-    "scripts/ci/build_ppu_wheels.sh", "scripts/ci/ppu_image_stack.py",
-    "scripts/ci/ppu_wheel_manifest.py", ".github/vllm-main-verified.commit",
-)
 LOGIN = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
 TITLE = re.compile(
     rf"PPU PR #([1-9][0-9]*) @ ([0-9a-f]{{40}}) by ({LOGIN}) \(comment ([1-9][0-9]*)\)"
@@ -193,47 +187,64 @@ class Controller:
     def execution_url(self):
         return f"{self.url}/actions/runs/{self.env['GITHUB_RUN_ID']}/attempts/{self.env.get('GITHUB_RUN_ATTEMPT', '1')}"
 
-    @staticmethod
-    def _ci_only(files):
-        return all(not f.startswith(BUILD_DIRS) for f in files)
+    def reusable_wheels(self, sha):
+        # Same trusted workflow revision pins build settings and runtime images.
+        for run in self.find_runs()[:20]:
+            if (
+                run.get("status") != "completed"
+                or run.get("conclusion") != "success"
+                or run.get("head_sha") != self.env["GITHUB_SHA"]
+                or not 0 < run["id"] < int(self.env["GITHUB_RUN_ID"])
+            ):
+                continue
+            if not any(
+                a["name"] == f"ppu-wheels-{run['id']}" and a.get("expired") is False
+                for a in self.pages(f"/actions/runs/{run['id']}/artifacts", "artifacts")
+            ):
+                continue  # Reuse-only executors are not wheel producers.
+            source = TITLE.fullmatch(run["display_title"])[2]
+            if source != sha:
+                diff = self.api("GET", f"/compare/{source}...{sha}")
+                files = diff["files"]
+                if (
+                    diff["status"] not in {"ahead", "identical"}
+                    or diff["merge_base_commit"]["sha"] != source
+                    or not isinstance(files, list)
+                    or len(files) >= 300
+                ):
+                    continue
+                # Wheel-only allowlist: unknown inputs and either rename end rebuild.
+                paths = []
+                for file in files:
+                    paths.append(file["filename"])
+                    if file.get("status") == "renamed" or "previous_filename" in file:
+                        paths.append(file["previous_filename"])
+                if any(
+                    not path.startswith(("docs/", "tests/", ".github/workflows/"))
+                    and path != "scripts/ci/ppu_ci_command.py"
+                    for path in paths
+                ):
+                    continue
+            return str(run["id"]), source
 
-    def _latest_reusable_build(self):
-        p, r, d = f".github/workflows/{WORKFLOW}", self.repo, self.default_branch
-        try:
-            return next(
-                (
-                    x["id"]
-                    for x in self.pages(
-                        f"/actions/workflows/{WORKFLOW}/runs",
-                        "workflow_runs",
-                        limit=10,
-                        event="workflow_dispatch",
-                        status="success",
-                    )
-                    if x.get("path") == p
-                    and x.get("head_branch") == d
-                    and x.get("conclusion") == "success"
-                    and x.get("repository", {}).get("full_name") == r
-                ),
-                None,
-            )
-        except Exception:
-            return None
-
-    def find_runs(self, pr, head_sha=None):
+    def find_runs(self, pr=None, head_sha=None):
+        query = (
+            {"created": ">=" + pr["created_at"][:10]} if pr else {"status": "success"}
+        )
         found = []
         for run in self.pages(
             f"/actions/workflows/{WORKFLOW}/runs",
             "workflow_runs",
             limit=10,
             event="workflow_dispatch",
-            created=">=" + pr["created_at"][:10],
+            **query,
         ):
             title = TITLE.fullmatch(run.get("display_title", ""))
             if (
                 title
-                and int(title[1]) == pr["number"]
+                and (pr is None or int(title[1]) == pr["number"])
                 and (head_sha is None or title[2] == head_sha)
+                and run.get("event") == "workflow_dispatch"
                 and run.get("path") == f".github/workflows/{WORKFLOW}"
                 and run.get("head_branch") == self.default_branch
                 and run.get("repository", {}).get("full_name") == self.repo
@@ -337,27 +348,12 @@ class Controller:
                 f"Already tested: {completed['html_url']}. Use `/ci retry` for failed "
                 "jobs or push a new commit; write permission is required to dispatch again."
             )
-        # Detect CI-only changes: if the PR only touches workflow, test, or doc
-        # files (nothing that enters the wheel), reuse the latest main build
-        # instead of rebuilding wheels (~12 min savings).
         dispatch_inputs = {
             "pr_number": str(pr["number"]),
             "head_sha": sha,
             "requester": login,
             "comment_id": str(cid),
         }
-        try:
-            changed = [
-                f["filename"] for f in self.pages(f"/pulls/{pr['number']}/files")
-            ]
-        except Exception:
-            changed = None
-        reused = False
-        if changed is not None and self._ci_only(changed):
-            build_id = self._latest_reusable_build()
-            if build_id is not None:
-                dispatch_inputs["existing_build_run_id"] = str(build_id)
-                reused = True
         self.launch(
             sha,
             f"Queued by @{login}",
@@ -365,7 +361,6 @@ class Controller:
             {"ref": self.default_branch, "inputs": dispatch_inputs},
         )
         warning = f"Warning: running {behind} commits behind base. " if behind else ""
-        reused_note = "Wheels reused from main build. " if reused else ""
         deadline = time.monotonic() + 30
         for _ in range(10):
             if time.monotonic() + 3 > deadline:
@@ -373,15 +368,9 @@ class Controller:
             self.sleep(3)
             for run in best_effort(lambda: self.find_runs(pr, sha)) or []:
                 if TITLE.fullmatch(run["display_title"])[4] == str(cid):
-                    return (
-                        warning
-                        + reused_note
-                        + f"PPU CI queued for {sha[:12]}: {run['html_url']}"
-                    )
-        return (
-            warning
-            + reused_note
-            + f"Dispatch accepted; run link pending: {self.url}/actions/workflows/{WORKFLOW}"
+                    return warning + f"PPU CI queued for {sha[:12]}: {run['html_url']}"
+        return warning + (
+            f"Dispatch accepted; run link pending: {self.url}/actions/workflows/{WORKFLOW}"
         )
 
     def cancel(self, pr, login):
@@ -460,6 +449,8 @@ class Controller:
             value = inputs.get(key)
             if not isinstance(value, str) or not re.fullmatch(pattern, value):
                 raise Rejected(f"Invalid input: {key}")
+        if inputs.keys() - patterns.keys():
+            raise Rejected("Unexpected executor inputs")
         return inputs
 
     def validate(self):
@@ -473,6 +464,16 @@ class Controller:
             "pending",
             f"Running (attempt {self.env.get('GITHUB_RUN_ATTEMPT', '1')})",
         )
+        build, source = best_effort(
+            lambda: self.reusable_wheels(inputs["head_sha"])
+        ) or ("", "")
+        print(
+            f"Wheel reuse: run={build}, source={source}"
+            if build
+            else "Wheel reuse unavailable: full build"
+        )
+        with open(self.env["GITHUB_OUTPUT"], "a") as output:
+            output.write(f"existing_build_run_id={build}\nwheel_source_sha={source}\n")
 
     def report(self):
         inputs = self.inputs()
