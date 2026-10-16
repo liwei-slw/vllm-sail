@@ -18,13 +18,10 @@ READY = {"ready", "ready-run-all-tests"}
 WRITE = {"write", "maintain", "admin"}
 WORKFLOW = "ppu-pr-ci.yaml"
 BUILD_DIRS = (
-    "csrc/",
-    "vllm_sail/",
-    "plugin/",
-    "setup.py",
-    "pyproject.toml",
-    "CMakeLists.txt",
-    "requirements/",
+    "csrc/", "vllm_sail/", "plugin/", "setup.py", "pyproject.toml",
+    "CMakeLists.txt", "requirements/", "cmake/",
+    "scripts/ci/build_ppu_wheels.sh", "scripts/ci/ppu_image_stack.py",
+    "scripts/ci/ppu_wheel_manifest.py", ".github/vllm-main-verified.commit",
 )
 LOGIN = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?"
 TITLE = re.compile(

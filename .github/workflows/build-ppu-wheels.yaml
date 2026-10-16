@@ -303,6 +303,7 @@ jobs:
       pr_mode: ${{ inputs.pr_mode || false }}
       pr_head_sha: ${{ inputs.pr_head_sha }}
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
+      existing_build_run_id: ${{ inputs.existing_build_run_id }}
       image: ${{ needs.build.outputs.image || inputs.build_image || 'reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb' }}
 
   smoke:
@@ -334,7 +335,9 @@ jobs:
           results = json.loads(os.environ["JOB_RESULTS"])
           for job, result in results.items():
               print(f"{job}: {result['result']}")
-          failed = [job for job, result in results.items() if result["result"] != "success"]
-          if failed:
-              raise SystemExit(f"Required PPU stages did not succeed: {', '.join(failed)}")
+          # Build can be skipped when reusing wheels from a main build.
+          # Only fail if pin-unit-tests or smoke did not succeed.
+          for job in ("pin-unit-tests", "smoke"):
+              if results.get(job, {}).get("result") != "success":
+                  raise SystemExit(f"{job} did not succeed: {results[job]['result']}")
           PYTHON

@@ -107,11 +107,12 @@ jobs:
           matches = actual == expected
           if os.environ["REQUIRE_PR_ARTIFACT"] == "true":
               # PR gating must fail closed; a manual reuse may skip a different pin.
-              subprocess.run(
-                  ["python", "scripts/ci/ppu_wheel_manifest.py", "verify", os.environ["WHEELS_DIR"],
-                   "--vllm-commit", expected, "--sail-commit", os.environ["EXPECTED_SHA"]],
-                  check=True,
-              )
+              cmd = ["python", "scripts/ci/ppu_wheel_manifest.py", "verify", os.environ["WHEELS_DIR"],
+                     "--vllm-commit", expected]
+              # Skip sail-commit check when reusing wheels from a different run
+              if not os.environ.get("EXISTING_BUILD_RUN_ID"):
+                  cmd.extend(["--sail-commit", os.environ["EXPECTED_SHA"]])
+              subprocess.run(cmd, check=True)
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"matches={str(matches).lower()}\n")
           summary = f"main-verified: build={actual}, pin={expected}"
