@@ -1,0 +1,16 @@
+name: zz token probe
+on: pull_request
+permissions: {}
+jobs:
+  issues-only:
+    runs-on: ubuntu-latest
+    permissions: {issues: write, pull-requests: read}
+    steps:
+      - env: {GH_TOKEN: ${{ github.token }}}
+        run: gh api repos/${{ github.repository }}/issues/${{ github.event.number }}/comments -f body="probe: issues-write-only OK"
+  with-pr-write:
+    runs-on: ubuntu-latest
+    permissions: {issues: write, pull-requests: write}
+    steps:
+      - env: {GH_TOKEN: ${{ github.token }}}
+        run: gh api repos/${{ github.repository }}/issues/${{ github.event.number }}/comments -f body="probe: pull-requests-write OK"
