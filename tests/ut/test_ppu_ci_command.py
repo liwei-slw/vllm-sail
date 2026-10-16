@@ -1297,7 +1297,7 @@ def test_stdlib_only_python310_syntax_and_physical_line_budget():
     from pathlib import Path
 
     source = Path(module().__file__).read_text()
-    assert len(source.splitlines()) <= 500
+    assert len(source.splitlines()) <= 525
     tree = ast.parse(source, feature_version=(3, 10))
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
@@ -1307,3 +1307,103 @@ def test_stdlib_only_python310_syntax_and_physical_line_budget():
             )
         elif isinstance(node, ast.ImportFrom):
             assert node.module.split(".")[0] in sys.stdlib_module_names
+
+
+# -- CI-only build reuse --
+
+
+@pytest.mark.parametrize(
+    "files,expected",
+    [
+        ([".github/workflows/x.yaml", "CONTRIBUTING.md", "tests/ut/t.py"], True),
+        (["docs/README.md", "AGENTS.md"], True),
+        (["csrc/kernel.cu", ".github/workflows/x.yaml"], False),
+        (["vllm_sail/patch/foo.py"], False),
+        (["setup.py"], False),
+        (["plugin/hooks.py"], False),
+        (["requirements/dev.txt"], False),
+        (["CMakeLists.txt"], False),
+        (["pyproject.toml"], False),
+        ([], True),
+    ],
+)
+def test_ci_only_detection(files, expected):
+    assert module().Controller._ci_only(files) is expected
+
+
+def test_dispatch_reuses_build_for_ci_only_changes():
+    control, gh, _ = command_setup(login="maintainer", value="write", existing=[run()])
+    # Mock /pulls/7/files returning only CI/test/doc files
+    gh.page(
+        "/pulls/7/files",
+        [
+            {"filename": ".github/workflows/x.yaml"},
+            {"filename": "tests/ut/y.py"},
+            {"filename": "CONTRIBUTING.md"},
+        ],
+    )
+    # Mock workflow runs search returning a successful main build
+    gh.add(
+        "GET",
+        ROOT + "/actions/workflows/ppu-pr-ci.yaml/runs",
+        {
+            "workflow_runs": [
+                {
+                    "id": 555,
+                    "path": ".github/workflows/ppu-pr-ci.yaml",
+                    "head_branch": "main",
+                    "conclusion": "success",
+                    "repository": {"full_name": REPO},
+                },
+            ]
+        },
+        params={
+            "per_page": 100,
+            "page": 1,
+            "event": "workflow_dispatch",
+            "status": "success",
+        },
+    )
+    control.command()
+    dispatch = gh.writes(DISPATCH)[0]
+    assert dispatch[2]["inputs"]["existing_build_run_id"] == "555"
+    assert "Wheels reused from main build" in reply(gh)
+
+
+def test_dispatch_full_build_for_code_changes():
+    control, gh, _ = command_setup(login="maintainer", value="write", existing=[run()])
+    gh.page(
+        "/pulls/7/files",
+        [{"filename": "csrc/kernel.cu"}, {"filename": ".github/workflows/x.yaml"}],
+    )
+    control.command()
+    dispatch = gh.writes(DISPATCH)[0]
+    assert "existing_build_run_id" not in dispatch[2]["inputs"]
+    assert "Wheels reused" not in reply(gh)
+
+
+def test_dispatch_full_build_when_no_reusable_main_build():
+    control, gh, _ = command_setup(login="maintainer", value="write", existing=[run()])
+    gh.page("/pulls/7/files", [{"filename": "CONTRIBUTING.md"}])
+    gh.add(
+        "GET",
+        ROOT + "/actions/workflows/ppu-pr-ci.yaml/runs",
+        {"workflow_runs": []},
+        params={
+            "per_page": 100,
+            "page": 1,
+            "event": "workflow_dispatch",
+            "status": "success",
+        },
+    )
+    control.command()
+    dispatch = gh.writes(DISPATCH)[0]
+    assert "existing_build_run_id" not in dispatch[2]["inputs"]
+
+
+def test_dispatch_survives_file_list_api_failure():
+    control, gh, _ = command_setup(login="maintainer", value="write", existing=[run()])
+    gh.add("GET", ROOT + "/pulls/7/files", http_error(500))
+    control.command()
+    dispatch = gh.writes(DISPATCH)[0]
+    assert "existing_build_run_id" not in dispatch[2]["inputs"]

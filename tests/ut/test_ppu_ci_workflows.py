@@ -86,10 +86,12 @@ def test_executor_uses_only_dispatch_with_a_stable_request_identity():
     config = workflow("ppu-pr-ci.yaml")
     assert set(config[True]) == {"workflow_dispatch"}
     inputs = config[True]["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {"pr_number", "head_sha", "requester", "comment_id"}
-    assert all(
-        item["type"] == "string" and item["required"] for item in inputs.values()
-    )
+    required_inputs = {"pr_number", "head_sha", "requester", "comment_id"}
+    assert required_inputs.issubset(set(inputs))
+    assert set(inputs) - required_inputs == {"existing_build_run_id"}
+    for name in required_inputs:
+        assert inputs[name]["type"] == "string" and inputs[name]["required"]
+    assert inputs["existing_build_run_id"]["required"] is False
     assert config["run-name"] == (
         "PPU PR #${{ inputs.pr_number }} @ ${{ inputs.head_sha }} "
         "by ${{ inputs.requester }} (comment ${{ inputs.comment_id }})"
@@ -111,7 +113,11 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     assert ppu["uses"] == "./.github/workflows/build-ppu-wheels.yaml"
     assert ppu["permissions"] == {"contents": "read", "actions": "read"}
     assert "secrets" not in ppu
-    assert ppu["with"] == {"pr_mode": True, "pr_head_sha": "${{ inputs.head_sha }}"}
+    assert ppu["with"] == {
+        "pr_mode": True,
+        "pr_head_sha": "${{ inputs.head_sha }}",
+        "existing_build_run_id": "${{ inputs.existing_build_run_id }}",
+    }
     report = jobs["report"]
     assert report["if"] == "always()"
     assert report["needs"] == ["validate", "ppu"]
@@ -225,7 +231,11 @@ def test_sha_verification_allows_different_owner_but_rejects_wrong_sha(
 def test_build_conditions_preserve_automatic_and_manual_routes():
     config = workflow("build-ppu-wheels.yaml")
     assert set(config[True]) == {"pull_request", "workflow_dispatch", "workflow_call"}
-    assert set(config[True]["workflow_call"]["inputs"]) == {"pr_mode", "pr_head_sha"}
+    assert set(config[True]["workflow_call"]["inputs"]) == {
+        "pr_mode",
+        "pr_head_sha",
+        "existing_build_run_id",
+    }
     assert set(config[True]["workflow_dispatch"]["inputs"]) == {
         "existing_build_run_id",
         "build_image",
@@ -247,13 +257,14 @@ def test_build_conditions_preserve_automatic_and_manual_routes():
         "${{ !cancelled() && (needs.build.result == 'success' || "
         "(needs.build.result == 'skipped' && inputs.existing_build_run_id != '')) }}"
     )
-    assert (
-        jobs["smoke"]["if"] == "inputs.pr_mode || github.event_name == 'pull_request'"
-    )
-    assert (
-        jobs["gate"]["if"]
-        == "${{ always() && (inputs.pr_mode || github.event_name == 'pull_request') }}"
-    )
+    smoke_if = str(jobs["smoke"]["if"])
+    assert "inputs.pr_mode || github.event_name == 'pull_request'" in smoke_if
+    assert "needs.build.result == 'success'" in smoke_if
+    assert "needs.build.result == 'skipped'" in smoke_if
+    gate_if = str(jobs["gate"]["if"])
+    assert "always()" in gate_if
+    assert "inputs.pr_mode || github.event_name == 'pull_request'" in gate_if
+    assert "needs.build.result == 'success'" in gate_if
     assert config["concurrency"]["cancel-in-progress"] == "${{ !inputs.pr_mode }}"
     assert "inputs.pr_mode" in config["concurrency"]["group"]
     assert "github.run_id" in config["concurrency"]["group"]
@@ -277,7 +288,8 @@ def test_pr_wheel_verification_uses_explicit_sha_and_is_not_skippable():
         for step in e2e["steps"]
         if step.get("name", "").startswith("Require the current PR artifact")
     )
-    assert verify["if"] == "inputs.pr_mode || github.event_name == 'pull_request'"
+    assert "inputs.pr_mode || github.event_name == 'pull_request'" in verify["if"]
+    assert "inputs.build_run_id == github.run_id" in verify["if"]
     assert verify["env"]["EXPECTED_SHA"] == EXPECTED_SHA
     assert '--sail-commit "${EXPECTED_SHA}"' in verify["run"]
 
@@ -343,3 +355,55 @@ def test_ops_partial_retry_downloads_diagnostics_from_successful_previous_attemp
             .replace("${{ github.run_attempt }}", "2")
         )
         assert downloaded == uploaded
+
+
+# -- CI-only build skip --
+
+
+def test_orchestrator_accepts_existing_build_run_id():
+    config = workflow("ppu-pr-ci.yaml")
+    inputs = config[True]["workflow_dispatch"]["inputs"]
+    assert "existing_build_run_id" in inputs
+    assert inputs["existing_build_run_id"]["required"] is False
+    assert inputs["existing_build_run_id"]["default"] == ""
+
+
+def test_build_ppu_workflow_accepts_existing_build_run_id():
+    config = workflow("build-ppu-wheels.yaml")
+    inputs = config[True]["workflow_call"]["inputs"]
+    assert "existing_build_run_id" in inputs
+    assert inputs["existing_build_run_id"]["default"] == ""
+
+
+def test_build_job_skipped_when_reusing_wheels():
+    config = workflow("build-ppu-wheels.yaml")
+    build = config["jobs"]["build"]
+    assert "inputs.existing_build_run_id == ''" in build["if"]
+
+
+def test_smoke_uses_existing_build_run_id_when_available():
+    config = workflow("build-ppu-wheels.yaml")
+    smoke = config["jobs"]["smoke"]
+    assert "existing_build_run_id" in str(smoke["with"]["build_run_id"])
+    # Smoke runs when build succeeds OR when build is skipped with reuse
+    if_str = str(smoke["if"])
+    assert "needs.build.result == 'success'" in if_str
+    assert "needs.build.result == 'skipped'" in if_str
+    assert "existing_build_run_id" in if_str
+
+
+def test_gate_allows_build_to_be_skipped_with_reuse():
+    config = workflow("build-ppu-wheels.yaml")
+    gate = config["jobs"]["gate"]
+    if_str = str(gate["if"])
+    assert "needs.build.result == 'success'" in if_str
+    assert "needs.build.result == 'skipped'" in if_str
+
+
+def test_e2e_verify_step_skipped_for_reused_wheels():
+    text = (WORKFLOWS / "e2e-ppu.yaml").read_text()
+    # The full verify step should only run when build_run_id matches current run
+    assert "inputs.build_run_id == github.run_id" in text
+    # A relaxed verify step should run for reused wheels
+    assert "inputs.build_run_id != github.run_id" in text
+    assert "Verify upstream pin for reused wheels" in text

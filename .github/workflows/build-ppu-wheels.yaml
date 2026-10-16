@@ -10,6 +10,10 @@ on:
       pr_head_sha:
         type: string
         default: ""
+      existing_build_run_id:
+        description: Skip build and reuse wheels from this run
+        type: string
+        default: ""
   workflow_dispatch:
     inputs:
       existing_build_run_id:
@@ -304,20 +308,18 @@ jobs:
   smoke:
     name: PPU E2E smoke
     needs: build
-    # PR smoke and pin UT consume this run's wheels in separate fresh pods.
-    # Manual artifact reuse remains available for pin-UT debugging only.
-    if: inputs.pr_mode || github.event_name == 'pull_request'
+    if: ${{ !cancelled() && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.existing_build_run_id != '')) && (inputs.pr_mode || github.event_name == 'pull_request') }}
     uses: ./.github/workflows/e2e-ppu.yaml
     with:
       pr_mode: ${{ inputs.pr_mode || false }}
       pr_head_sha: ${{ inputs.pr_head_sha }}
-      build_run_id: ${{ github.run_id }}
-      image: ${{ needs.build.outputs.image }}
+      build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
+      image: ${{ needs.build.outputs.image || inputs.build_image || 'reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb' }}
 
   gate:
     name: PPU CI gate
     needs: [build, pin-unit-tests, smoke]
-    if: ${{ always() && (inputs.pr_mode || github.event_name == 'pull_request') }}
+    if: ${{ always() && (inputs.pr_mode || github.event_name == 'pull_request') && (needs.build.result == 'success' || (needs.build.result == 'skipped' && inputs.existing_build_run_id != '')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

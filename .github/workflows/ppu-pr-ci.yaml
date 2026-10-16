@@ -16,6 +16,11 @@ on:
       comment_id:
         required: true
         type: string
+      existing_build_run_id:
+        description: Reuse wheels from this run (CI-only PRs)
+        required: false
+        default: ""
+        type: string
 
 permissions: {}
 cache-mode: none
@@ -57,6 +62,7 @@ jobs:
     with:
       pr_mode: true
       pr_head_sha: ${{ inputs.head_sha }}
+      existing_build_run_id: ${{ inputs.existing_build_run_id }}
 
   report:
     needs: [validate, ppu]
