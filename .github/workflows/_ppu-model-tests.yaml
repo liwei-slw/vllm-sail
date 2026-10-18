@@ -1,9 +1,6 @@
-name: E2E PPU smoke
+name: PPU model tests
 
-# End-to-end smoke test on real PPU cards. It reuses the wheels produced by a
-# PPU CI build, serves a model from the auto-mounted NAS checkpoint,
-# and verifies one chat completion. PR CI calls this after its wheel build;
-# manual dispatch can still select an existing build for investigation.
+# Called by _ppu-pr-pipeline.yaml and ppu-debug.yaml; use ppu-debug.yaml for manual debugging.
 
 on:
   workflow_call:
@@ -30,22 +27,6 @@ on:
         description: SAIL runtime image
         type: string
         default: reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb
-  workflow_dispatch:
-    inputs:
-      build_run_id:
-        description: Run ID of a PPU CI build whose ppu-wheels-<run_id> artifact holds the wheels under test
-        required: true
-        type: string
-      models:
-        description: Comma-separated catalog keys to run (blank = every model in scripts/ci/ppu_e2e_models.json)
-        required: false
-        default: qwen3.8-27b
-        type: string
-      image:
-        description: Runtime container image the PPU pod runs
-        required: true
-        default: reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb
-        type: string
 
 permissions:
   contents: read
