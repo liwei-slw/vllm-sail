@@ -11,7 +11,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "ci" / "build_ppu_wheels.sh"
-WORKFLOW = ROOT / ".github" / "workflows" / "build-ppu-wheels.yaml"
+WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-build.yaml"
 
 
 def test_build_script_has_valid_bash_syntax() -> None:
@@ -74,10 +74,12 @@ def test_build_script_caps_parallelism_to_avoid_oom() -> None:
     assert 'BUILD_JOBS="${BUILD_JOBS:-' in text
 
 
-def test_build_workflow_supports_on_demand_and_manual_runs_on_cpu_runner() -> None:
+def test_build_workflow_is_call_only_on_cpu_runner() -> None:
+    import yaml
+
     text = WORKFLOW.read_text()
-    assert "workflow_dispatch:" in text
-    assert "workflow_call:" in text
+    assert set(yaml.safe_load(text)[True]) == {"workflow_call"}
+    assert "workflow_dispatch:" not in text
     assert "pull_request:" not in text
     assert "push:" not in text
     # ppu-scheduler-action does not support compiling on PPU resources; t-head
@@ -93,11 +95,13 @@ def test_build_workflow_uses_script_and_retains_artifacts() -> None:
     assert "bash scripts/ci/build_ppu_wheels.sh" in text
     import yaml
 
-    jobs = yaml.safe_load(text)["jobs"]
-    for job in ("build", "ops-build"):
+    ops = yaml.safe_load((WORKFLOW.parent / "ppu-ops-qualification.yaml").read_text())[
+        "jobs"
+    ]
+    for job in (yaml.safe_load(text)["jobs"]["build"], ops["ops-build"]):
         uploads = {
             step["with"]["name"]: step["with"]
-            for step in jobs[job]["steps"]
+            for step in job["steps"]
             if step.get("uses") == "actions/upload-artifact@v4"
         }
         assert set(uploads) == {
@@ -116,7 +120,7 @@ def test_build_workflow_uses_script_and_retains_artifacts() -> None:
         assert any(
             step.get("with", {}).get("name")
             == f"ppu-ops-{name}-${{{{ github.run_id }}}}-${{{{ github.run_attempt }}}}"
-            for step in jobs[job]["steps"]
+            for step in ops[job]["steps"]
         )
     assert "if-no-files-found: error" in text
     assert "if-no-files-found: warn" in text
@@ -210,16 +214,19 @@ def test_all_ci_paths_use_the_same_pinned_image_stack():
 
     image = "reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb"
     workflow = yaml.safe_load(WORKFLOW.read_text())
-    inputs = workflow[True]["workflow_dispatch"]["inputs"]
+    inputs = yaml.safe_load(
+        (WORKFLOW.parent / "ppu-ops-qualification.yaml").read_text()
+    )[True]["workflow_dispatch"]["inputs"]
     assert not {"sdk_url", "torch_url"} & inputs.keys()
     assert inputs["build_image"]["default"] == image
     assert inputs["ops_image"]["default"] == image
     build = workflow["jobs"]["build"]
     assert image in build["container"]["image"]
     assert build["env"]["VLLM_SAIL_BUILD_IMAGE"] == build["container"]["image"]
-    for job in ("pin-unit-tests", "smoke"):
-        assert "needs.build.outputs.image" in workflow["jobs"][job]["with"]["image"]
-    for name in ("ppu-pin-ut.yaml", "e2e-ppu.yaml"):
+    pipeline = yaml.safe_load((WORKFLOW.parent / "_ppu-pr-pipeline.yaml").read_text())
+    for job in ("pin-unit-tests", "model-tests"):
+        assert "needs.build.outputs.image" in pipeline["jobs"][job]["with"]["image"]
+    for name in ("_ppu-pin-ut.yaml", "_ppu-model-tests.yaml", "ppu-debug.yaml"):
         triggers = yaml.safe_load((WORKFLOW.parent / name).read_text())[True]
         for trigger in triggers.values():
             assert trigger["inputs"]["image"]["default"] == image

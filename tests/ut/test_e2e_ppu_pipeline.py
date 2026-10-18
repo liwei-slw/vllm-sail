@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[2]
 SMOKE = ROOT / "scripts" / "ci" / "ppu_e2e_smoke.sh"
 SELECT = ROOT / "scripts" / "ci" / "ppu_e2e_select.py"
 MODELS = ROOT / "scripts" / "ci" / "ppu_e2e_models.json"
-WORKFLOW = ROOT / ".github" / "workflows" / "e2e-ppu.yaml"
+WORKFLOW = ROOT / ".github" / "workflows" / "_ppu-model-tests.yaml"
 
 
 def _load_select():
@@ -137,11 +137,10 @@ def test_smoke_script_fails_when_serve_dies_early() -> None:
 # --- workflow -----------------------------------------------------------------
 
 
-def test_e2e_workflow_is_reusable_and_manual_and_uses_cpu_runner() -> None:
+def test_e2e_workflow_is_call_only_and_uses_cpu_runner() -> None:
     text = WORKFLOW.read_text()
-    assert "workflow_dispatch:" in text
-    # PR orchestration calls the same workflow as manual smoke runs.
-    assert "workflow_call:" in text
+    assert set(yaml.safe_load(text)[True]) == {"workflow_call"}
+    assert "workflow_dispatch:" not in text
     assert "pull_request:" not in text
     assert "push:" not in text
     # ppu-scheduler-action itself runs on the CPU runner scale set and dispatches
@@ -160,12 +159,19 @@ def test_e2e_workflow_only_exposes_model_smoke() -> None:
     text = WORKFLOW.read_text()
     workflow = yaml.safe_load(text)
     trigger = workflow.get("on", workflow.get(True))
-    assert set(trigger) == {"workflow_call", "workflow_dispatch"}
-    assert set(trigger["workflow_dispatch"]["inputs"]) == {
+    assert workflow["name"] == "PPU model tests"
+    assert set(trigger) == {"workflow_call"}
+    debug = yaml.safe_load((WORKFLOW.parent / "ppu-debug.yaml").read_text())
+    assert set(debug[True]) == {"workflow_dispatch"}
+    assert set(debug[True]["workflow_dispatch"]["inputs"]) == {
         "build_run_id",
+        "target",
         "models",
         "image",
     }
+    assert debug["jobs"]["model-tests"]["uses"] == (
+        "./.github/workflows/_ppu-model-tests.yaml"
+    )
     assert set(trigger["workflow_call"]["inputs"]) == {
         "build_run_id",
         "models",
@@ -185,10 +191,12 @@ def test_e2e_workflow_only_exposes_model_smoke() -> None:
     ):
         assert marker not in text
     caller = yaml.safe_load(
-        (ROOT / ".github/workflows/build-ppu-wheels.yaml").read_text()
+        (ROOT / ".github/workflows/_ppu-pr-pipeline.yaml").read_text()
     )
-    assert caller["jobs"]["smoke"]["uses"] == "./.github/workflows/e2e-ppu.yaml"
-    assert caller["jobs"]["gate"]["needs"] == ["build", "pin-unit-tests", "smoke"]
+    assert caller["jobs"]["model-tests"]["uses"] == (
+        "./.github/workflows/_ppu-model-tests.yaml"
+    )
+    assert caller["jobs"]["gate"]["needs"] == ["build", "pin-unit-tests", "model-tests"]
 
 
 def test_e2e_workflow_pulls_wheels_by_run_id() -> None:

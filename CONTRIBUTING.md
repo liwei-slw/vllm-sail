@@ -89,7 +89,7 @@ Post one of these exact commands as a new PR comment:
 
 | Command | Behavior |
 | --- | --- |
-| `/ci run` | Build wheels, run pin unit tests and E2E smoke for the current head. |
+| `/ci run` | Build wheels, run pin unit tests and model smoke tests for the current head. |
 | `/ci run --allow-stale` | Run even when the PR is behind its base branch; no automatic merge is performed. |
 | `/ci retry` | Retry failed jobs in the latest run for the current head, falling back to a full rerun if GitHub rejects the partial rerun. |
 | `/ci cancel` | Request cancellation of active PPU CI runs for this PR, including older heads. |
@@ -111,8 +111,9 @@ run separately on GitHub-hosted runners using default-branch code.
 
 CPU checks still run automatically. PPU CI for PRs is requested through the
 commands above; opening a PR or pushing a commit does not start it automatically.
-Manual operator tests and existing-build pin tests remain available through
-GitHub Actions workflow dispatch.
+Manually dispatch PPU ops qualification (`ppu-ops-qualification.yaml`) in GitHub
+Actions for operator tests. Dispatch PPU debug (`ppu-debug.yaml`) to rerun pin UT
+and/or model tests on existing builds.
 
 Repository administrators must require the `PPU CI` commit status from GitHub
 Actions instead of the individual PPU build, pin UT, smoke and gate job checks.
