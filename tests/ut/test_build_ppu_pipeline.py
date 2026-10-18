@@ -95,9 +95,7 @@ def test_build_workflow_uses_script_and_retains_artifacts() -> None:
     assert "bash scripts/ci/build_ppu_wheels.sh" in text
     import yaml
 
-    ops = yaml.safe_load((WORKFLOW.parent / "ppu-ops-qualification.yaml").read_text())[
-        "jobs"
-    ]
+    ops = yaml.safe_load((WORKFLOW.parent / "ppu-ops-tests.yaml").read_text())["jobs"]
     for job in (yaml.safe_load(text)["jobs"]["build"], ops["ops-build"]):
         uploads = {
             step["with"]["name"]: step["with"]
@@ -214,9 +212,9 @@ def test_all_ci_paths_use_the_same_pinned_image_stack():
 
     image = "reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb"
     workflow = yaml.safe_load(WORKFLOW.read_text())
-    inputs = yaml.safe_load(
-        (WORKFLOW.parent / "ppu-ops-qualification.yaml").read_text()
-    )[True]["workflow_dispatch"]["inputs"]
+    inputs = yaml.safe_load((WORKFLOW.parent / "ppu-ops-tests.yaml").read_text())[True][
+        "workflow_dispatch"
+    ]["inputs"]
     assert not {"sdk_url", "torch_url"} & inputs.keys()
     assert inputs["build_image"]["default"] == image
     assert inputs["ops_image"]["default"] == image

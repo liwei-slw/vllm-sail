@@ -190,7 +190,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
         "_ppu-build.yaml",
         "_ppu-pin-ut.yaml",
         "_ppu-model-tests.yaml",
-        "ppu-ops-qualification.yaml",
+        "ppu-ops-tests.yaml",
         "ppu-debug.yaml",
     ],
 )
@@ -343,9 +343,9 @@ def test_pr_pipeline_structure():
         }
 
 
-def test_ops_qualification_structure():
-    config = workflow("ppu-ops-qualification.yaml")
-    assert config["name"] == "PPU ops qualification"
+def test_ops_manual_entry_structure():
+    config = workflow("ppu-ops-tests.yaml")
+    assert config["name"] == "PPU ops tests (manual)"
     assert set(config[True]) == {"workflow_dispatch"}
     assert config[True]["workflow_dispatch"]["inputs"] == {
         "build_image": {
@@ -380,7 +380,7 @@ def test_ops_qualification_structure():
         },
     }
     assert config["concurrency"] == {
-        "group": "ppu-ops-qualification-${{ github.ref }}",
+        "group": "ppu-ops-tests-${{ github.ref }}",
         "cancel-in-progress": True,
     }
     jobs = config["jobs"]
@@ -528,7 +528,7 @@ def test_pr_wheel_verification_uses_explicit_sha_and_is_not_skippable():
 def test_retry_reuses_build_artifacts_but_keeps_pin_diagnostics_per_attempt():
     for name, job_id in (
         ("_ppu-build.yaml", "build"),
-        ("ppu-ops-qualification.yaml", "ops-build"),
+        ("ppu-ops-tests.yaml", "ops-build"),
     ):
         uploads = {
             step["with"]["name"]: step["with"]
@@ -561,7 +561,7 @@ def test_cpu_checks_still_run_automatically_with_read_only_checkout():
 
 
 def test_ops_partial_retry_downloads_diagnostics_from_successful_previous_attempt():
-    build = workflow("ppu-ops-qualification.yaml")["jobs"]
+    build = workflow("ppu-ops-tests.yaml")["jobs"]
     producer = next(
         step["with"]["name"]
         for step in build["ops-build"]["steps"]

@@ -111,9 +111,9 @@ run separately on GitHub-hosted runners using default-branch code.
 
 CPU checks still run automatically. PPU CI for PRs is requested through the
 commands above; opening a PR or pushing a commit does not start it automatically.
-Manually dispatch PPU ops qualification (`ppu-ops-qualification.yaml`) in GitHub
-Actions for operator tests. Dispatch PPU debug (`ppu-debug.yaml`) to rerun pin UT
-and/or model tests on existing builds.
+Manually dispatch PPU ops tests (`ppu-ops-tests.yaml`) in GitHub Actions for
+operator tests. Dispatch PPU debug (`ppu-debug.yaml`) to rerun pin UT and/or
+model tests on existing builds.
 
 Repository administrators must require the `PPU CI` commit status from GitHub
 Actions instead of the individual PPU build, pin UT, smoke and gate job checks.

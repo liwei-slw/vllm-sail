@@ -1,4 +1,4 @@
-name: PPU ops qualification
+name: PPU ops tests (manual)
 
 on:
   workflow_dispatch:
@@ -35,7 +35,7 @@ permissions:
 cache-mode: none
 
 concurrency:
-  group: ppu-ops-qualification-${{ github.ref }}
+  group: ppu-ops-tests-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
