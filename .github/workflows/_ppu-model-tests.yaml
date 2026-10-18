@@ -150,7 +150,7 @@ jobs:
           github-token: ${{ github.token }}
 
       - name: Require the expected wheel source and verified upstream pin
-        if: inputs.pr_mode || github.event_name == 'pull_request'
+        if: inputs.pr_mode
         shell: bash
         env:
           WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}

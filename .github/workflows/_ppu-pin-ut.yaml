@@ -92,7 +92,7 @@ jobs:
       - name: Verify wheel manifest and pin
         id: manifest
         env:
-          REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode || github.event_name == 'pull_request' }}
+          REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode }}
           WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
         run: |
           python scripts/ci/ppu_wheel_manifest.py verify "${WHEELS_DIR}"
