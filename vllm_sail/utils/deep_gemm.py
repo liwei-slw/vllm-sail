@@ -923,11 +923,11 @@ def should_use_deepgemm_for_fp8_linear(
     N_MULTIPLE = 64
     K_MULTIPLE = 128
 
+    supports_shape = (not block_quant) or (weight_shape[1] % K_MULTIPLE == 0 and weight_shape[0] % N_MULTIPLE == 0)
     return (
         supports_deep_gemm
         and output_dtype == torch.bfloat16
-        and weight_shape[0] % N_MULTIPLE == 0
-        and (not block_quant or weight_shape[1] % K_MULTIPLE == 0)
+        and supports_shape
     )
 
 
