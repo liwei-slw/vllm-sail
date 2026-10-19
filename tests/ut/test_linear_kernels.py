@@ -46,7 +46,7 @@ _EXPECTED_FIRST = {
     [
         ((5120, 576), True, "", True, True),
         ((128, 256), True, "deepgemm", True, True),
-        ((96, 576), True, "", True, False),
+        ((96, 576), True, "", True, True),
         ((5120, 576), False, "", True, False),
         ((5120, 576), True, "cutlass", True, False),
         ((5120, 576), True, "", False, False),
@@ -89,9 +89,14 @@ def test_channelwise_deepgemm_preserves_k_and_other_gates(
 
 
 @pytest.mark.parametrize(
-    "k,channelwise,blockwise", [(576, True, False), (640, True, True)]
+    "n,k,channelwise,blockwise",
+    [
+        (128, 576, True, False),  # blockwise rejects K % 128 != 0
+        (128, 640, True, True),
+        (96, 640, True, False),  # blockwise rejects N % 64 != 0
+    ],
 )
-def test_fp8_scale_granularity_controls_k_alignment(k, channelwise, blockwise):
+def test_fp8_scale_granularity_controls_shape_alignment(n, k, channelwise, blockwise):
     torch = SimpleNamespace(bfloat16=object())
     predicate = function(
         "vllm_sail/utils/deep_gemm.py",
@@ -101,8 +106,9 @@ def test_fp8_scale_granularity_controls_k_alignment(k, channelwise, blockwise):
             "ppu_envs": SimpleNamespace(VLLM_SAIL_DENSE_BACKEND=""),
         },
     )
-    assert predicate(torch.bfloat16, (128, k), True, block_quant=False) is channelwise
-    assert predicate(torch.bfloat16, (128, k), True) is blockwise
+    # Channelwise imposes no shape constraints; blockwise keeps both gates.
+    assert predicate(torch.bfloat16, (n, k), True, block_quant=False) is channelwise
+    assert predicate(torch.bfloat16, (n, k), True) is blockwise
 
 
 @pytest.fixture(scope="module")

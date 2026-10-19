@@ -916,19 +916,18 @@ def should_use_deepgemm_for_fp8_linear(
     if supports_deep_gemm is None:
         supports_deep_gemm = is_deep_gemm_supported()
 
-    # Channel/tensor scales do not partition K. Only blockwise FP8 requires
-    # its 128-element K blocks; keep that constraint for existing callers.
+    # Channel/tensor scales do not partition K, so channelwise GEMM carries
+    # no shape constraints; blockwise FP8 keeps the 128-element K blocks and
+    # the N multiple.
     # NOTE: Also synchronized with test_w8a8_block_fp8_deep_gemm_matmul
     # test inside kernels/quantization/test_block_fp8.py
     N_MULTIPLE = 64
     K_MULTIPLE = 128
 
-    supports_shape = (not block_quant) or (weight_shape[1] % K_MULTIPLE == 0 and weight_shape[0] % N_MULTIPLE == 0)
-    return (
-        supports_deep_gemm
-        and output_dtype == torch.bfloat16
-        and supports_shape
+    supports_shape = not block_quant or (
+        weight_shape[0] % N_MULTIPLE == 0 and weight_shape[1] % K_MULTIPLE == 0
     )
+    return supports_deep_gemm and output_dtype == torch.bfloat16 and supports_shape
 
 
 @functools.cache
