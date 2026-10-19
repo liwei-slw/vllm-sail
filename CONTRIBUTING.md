@@ -80,6 +80,45 @@ and include test commands and results. Performance changes need baseline and
 candidate measurements under the same workload. Avoid force pushes and direct
 pushes to shared branches; use follow-up commits for review changes.
 
+## PPU CI commands
+
+On an open PR, repository writers and users in `CI_TRUSTED_USERS` can request
+PPU CI. The PR author can also request it once the non-draft PR has `ready` or
+`ready-run-all-tests`, or an approved review decision with a trusted approval.
+Post one of these exact commands as a new PR comment:
+
+| Command | Behavior |
+| --- | --- |
+| `/ci run` | Build wheels, run pin unit tests and E2E smoke for the current head. |
+| `/ci run --allow-stale` | Run even when the PR is behind its base branch; no automatic merge is performed. |
+| `/ci retry` | Retry failed jobs in the latest run for the current head, falling back to a full rerun if GitHub rejects the partial rerun. |
+| `/ci cancel` | Request cancellation of active PPU CI runs for this PR, including older heads. |
+
+Push a new commit and post `/ci run` again to test it. Once a head has completed
+CI, only repository writers can request another full run; others should use
+`/ci retry` for failures. Successful builds are reused by partial retries while
+their wheel artifacts remain available (14-day retention). If they have expired,
+request a new build from a repository writer or push a new commit. Repository
+writers may also use GitHub's native Re-run controls. Retry results update the
+`PPU CI` status and the bot's original `/ci run` reply, not the `/ci retry`
+acknowledgement.
+
+The on-demand workflow is dispatched from the default branch and reports the
+`PPU CI` commit status on the tested head, with links and attempt numbers. PR
+code runs with read-only permissions, no inherited secrets, disabled cache
+access and an explicitly verified checkout SHA. Authorization and reporting
+run separately on GitHub-hosted runners using default-branch code.
+
+CPU checks still run automatically. PPU CI for PRs is requested through the
+commands above; opening a PR or pushing a commit does not start it automatically.
+Manual operator tests and existing-build pin tests remain available through
+GitHub Actions workflow dispatch.
+
+Repository administrators must require the `PPU CI` commit status from GitHub
+Actions instead of the individual PPU build, pin UT, smoke and gate job checks.
+Keep the CPU and vLLM source checks required. Coordinate this ruleset change with
+the switch to on-demand PPU CI, after verifying the commands on the default branch.
+
 ## Reporting issues
 
 Use the bug or feature request template in the repository's Issues tab. Bug
