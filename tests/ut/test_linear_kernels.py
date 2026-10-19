@@ -330,8 +330,9 @@ def test_fp8_registry_selects_kernel_for_scale_granularity(
         type(current_platform), "is_device_capability", lambda self, cap: False
     )
     monkeypatch.setattr(ppu_kernels, "is_deep_gemm_supported", lambda: True)
+    # Keyword-only params (e.g. block_quant) must not break the stub.
     monkeypatch.setattr(
-        ppu_kernels, "should_use_deepgemm_for_fp8_linear", lambda *args: True
+        ppu_kernels, "should_use_deepgemm_for_fp8_linear", lambda *args, **kwargs: True
     )
     config = FP8ScaledMMLinearLayerConfig(
         activation_quant_key=getattr(quant_utils, activation_key),
