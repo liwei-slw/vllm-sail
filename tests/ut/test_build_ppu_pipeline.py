@@ -74,10 +74,11 @@ def test_build_script_caps_parallelism_to_avoid_oom() -> None:
     assert 'BUILD_JOBS="${BUILD_JOBS:-' in text
 
 
-def test_build_workflow_supports_prs_and_manual_runs_on_cpu_runner() -> None:
+def test_build_workflow_supports_on_demand_and_manual_runs_on_cpu_runner() -> None:
     text = WORKFLOW.read_text()
     assert "workflow_dispatch:" in text
-    assert "pull_request:" in text
+    assert "workflow_call:" in text
+    assert "pull_request:" not in text
     assert "push:" not in text
     # ppu-scheduler-action does not support compiling on PPU resources; t-head
     # build jobs must run on the CPU runner scale set. The pod is sized with
@@ -104,6 +105,7 @@ def test_build_workflow_uses_script_and_retains_artifacts() -> None:
             "ppu-build-diagnostics-${{ github.run_id }}",
         }
         assert all(config["retention-days"] == 14 for config in uploads.values())
+        assert all(config["overwrite"] is True for config in uploads.values())
         assert (
             uploads["ppu-wheels-${{ github.run_id }}"]["if-no-files-found"] == "error"
         )
