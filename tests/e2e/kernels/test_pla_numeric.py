@@ -53,7 +53,7 @@ from vllm.platforms import current_platform  # noqa: E402
 if not current_platform.is_ppu():
     pytest.skip("requires a PPU platform (is_ppu() is False)", allow_module_level=True)
 
-from tests.e2e.fork_port._tolerances import (  # noqa: E402
+from tests.e2e.gdn._tolerances import (  # noqa: E402
     get_default_atol,
     get_default_rtol,
 )
