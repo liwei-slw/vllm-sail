@@ -7,8 +7,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from tests.e2e.fork_port._gdn_mtp_reference import gdn_mtp_reference  # noqa: E402
-from tests.e2e.fork_port._gdn_mtp_utils import assert_unchanged  # noqa: E402
+from tests.e2e.gdn._gdn_mtp_reference import gdn_mtp_reference  # noqa: E402
+from tests.e2e.gdn._gdn_mtp_utils import assert_unchanged  # noqa: E402
 
 
 def _inputs(*, lengths=(1,), indices=((1,),), accepted=(1,), state_dtype=None):

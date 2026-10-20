@@ -201,9 +201,7 @@ def test_gdn_e2e_env_cases_ignore_inherited_ci_environment(
         else "test_ppu_pla_env_resolution"
     )
     namespace = {"envs": envs}
-    _load_gdn_functions(
-        f"tests/e2e/fork_port/test_gdn_pla_{kind}.py", [name], namespace
-    )
+    _load_gdn_functions(f"tests/e2e/gdn/test_gdn_pla_{kind}.py", [name], namespace)
     monkeypatch.setenv("VLLM_SAIL_USE_PLA", "1")
     monkeypatch.setenv("VLLM_PPU_USE_PLA", "0")
     namespace[name](monkeypatch, raw, expected)
@@ -249,7 +247,7 @@ def test_gdn_prefill_e2e_resolver_stubs_match_production(monkeypatch, name):
         HK=4,
     )
     _load_gdn_functions(
-        "tests/e2e/fork_port/test_gdn_pla_prefill.py",
+        "tests/e2e/gdn/test_gdn_pla_prefill.py",
         ["_install_fake_pla", "_stub_resolver_env", name],
         namespace,
     )

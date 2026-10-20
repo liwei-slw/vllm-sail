@@ -121,7 +121,7 @@ correctness report, and test both architecture targets when claiming both.
 Run the native GDN MTP accuracy matrix with a native plugin build:
 
 ```bash
-python -m pytest tests/e2e/fork_port/test_gdn_fused_mtp.py -q -rs \
+python -m pytest tests/e2e/gdn/test_gdn_fused_mtp.py -q -rs \
   -o junit_family=xunit1 --junitxml=gdn-mtp-accuracy.xml
 ```
 
