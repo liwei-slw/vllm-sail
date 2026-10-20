@@ -143,6 +143,23 @@ def test_bf16_dense_gemm_nt(m, n, k):
 
 
 @pytest.mark.parametrize(("tokens", "experts", "n", "k"), GROUPED_SHAPES)
+def test_m_grouped_bf16_gemm_nt_nopad(tokens, experts, n, k):
+    """Grouped BF16 GEMM against the per-expert FP32 golden."""
+    from vllm_sail.utils.deep_gemm import m_grouped_bf16_gemm_nt_nopad
+
+    expert_ids, _ = _uniform_expert_ids(tokens, experts)
+    x = _randn(tokens, k, seed=16)
+    w = _randn(experts, n, k, seed=17) * 0.05
+    out = torch.empty((tokens, n), device="cuda", dtype=torch.bfloat16)
+
+    m_grouped_bf16_gemm_nt_nopad(x, w, out, expert_ids, None)
+    torch.cuda.synchronize()
+
+    expected = ref.ref_grouped_gemm(x, w, expert_ids)
+    ref.assert_close(out, expected, "bf16")
+
+
+@pytest.mark.parametrize(("tokens", "experts", "n", "k"), GROUPED_SHAPES)
 def test_bf16_dense_linear_dispatch_gating(tokens, experts, n, k, monkeypatch):
     """BF16 dense DeepGEMM support is chip- *and* env-gated (capability != default).
 
