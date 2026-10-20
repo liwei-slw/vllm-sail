@@ -6,6 +6,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -36,20 +37,60 @@ def test_models_catalog_is_valid_json_with_required_fields() -> None:
     assert len(keys) == len(set(keys)), "model keys must be unique"
 
 
-def test_default_matrix_targets_qwen_on_810e() -> None:
-    catalog = json.loads(MODELS.read_text())
-    qwen = next(e for e in catalog if e["key"] == "qwen3.8-27b")
-    # Checkpoints are read from /nas_aisw/datasets, the internal NAS root
-    # recorded in the model catalog sheet.
+@pytest.mark.parametrize(
+    ("key", "board"),
+    [
+        ("qwen3.8-27b", "OAM-810E"),
+        ("qwen3.8-27b-m890p", "ZW-M890P"),
+    ],
+)
+def test_qwen_catalog_targets_both_boards(key: str, board: str) -> None:
+    catalog = {entry["key"]: entry for entry in json.loads(MODELS.read_text())}
+    assert key in catalog
+    qwen = catalog[key]
     assert qwen["checkpoint"] == (
         "/nas_aisw/datasets/checkpoints/LLM/Qwen/v3.8/Qwen3.8-27B"
     )
-    # The built wheels (arch ppu_15;ppu_10) are only verified on 810E.
-    assert qwen["board"] == "OAM-810E"
+    assert qwen["board"] == board
     assert int(qwen["tp"]) == 2
+    assert qwen["served_name"] == "qwen3.8-27b"
+    assert qwen["extra_serve_flags"] == "--trust-remote-code"
+
+
+@pytest.mark.parametrize(
+    ("filename", "event"),
+    [
+        ("_ppu-model-tests.yaml", "workflow_call"),
+        ("ppu-debug.yaml", "workflow_dispatch"),
+    ],
+)
+def test_model_workflow_defaults_cover_both_boards(filename: str, event: str) -> None:
+    config = yaml.safe_load((WORKFLOW.parent / filename).read_text())
+    models = config[True][event]["inputs"]["models"]["default"]
+    catalog = json.loads(MODELS.read_text())
+    matrix = _load_select().build_matrix(catalog, models)
+    assert [(entry["key"], entry["board"]) for entry in matrix["include"]] == [
+        ("qwen3.8-27b", "OAM-810E"),
+        ("qwen3.8-27b-m890p", "ZW-M890P"),
+    ]
 
 
 # --- matrix selector ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("key", "board"),
+    [
+        ("qwen3.8-27b", "OAM-810E"),
+        ("qwen3.8-27b-m890p", "ZW-M890P"),
+    ],
+)
+def test_selector_can_target_each_qwen_board(key: str, board: str) -> None:
+    catalog = json.loads(MODELS.read_text())
+    matrix = _load_select().build_matrix(catalog, key)
+    assert len(matrix["include"]) == 1
+    assert matrix["include"][0]["key"] == key
+    assert matrix["include"][0]["board"] == board
 
 
 def test_selector_default_returns_every_model() -> None:
@@ -147,8 +188,6 @@ def test_e2e_workflow_is_call_only_and_uses_cpu_runner() -> None:
     # a PPU pod; the workflow must not try to run on PPU directly.
     assert "runs-on: k8s-runner-group-cpu-thead" in text
     assert "t-head/ppu-scheduler-action@main" in text
-    # board is data-driven from the matrix (the literal OAM-810E lives in the
-    # catalog and is asserted by test_default_matrix_targets_qwen_on_810e).
     assert "board-type=${{ matrix.model.board }}" in text
     assert "contents: read" in text
     # cross-run artifact download needs the actions:read scope.

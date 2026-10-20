@@ -22,7 +22,7 @@ on:
       models:
         description: Comma-separated model catalog keys
         type: string
-        default: qwen3.8-27b
+        default: qwen3.8-27b,qwen3.8-27b-m890p
       image:
         description: SAIL runtime image
         type: string
@@ -168,7 +168,6 @@ jobs:
           nnodes: 0
           nproc_per_node: ${{ matrix.model.tp }}
           namespace: ppu-sched
-          # The built wheels (arch ppu_15;ppu_10) are only verified on 810E.
           node_selector: board-type=${{ matrix.model.board }}
           timeout_minutes: 90
           cleanup_policy: always

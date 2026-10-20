@@ -418,7 +418,7 @@ def test_debug_structure():
     assert inputs["target"]["options"] == ["both", "pin-ut", "model-tests"]
     assert inputs["target"]["default"] == "both"
     assert inputs["models"]["type"] == "string"
-    assert inputs["models"]["default"] == "qwen3.8-27b"
+    assert inputs["models"]["default"] == "qwen3.8-27b,qwen3.8-27b-m890p"
     assert inputs["image"]["type"] == "string"
     assert inputs["image"]["required"] is True
     assert inputs["image"]["default"] == DEFAULT_IMAGE

@@ -17,7 +17,7 @@ on:
       models:
         description: Comma-separated model catalog keys for model tests (blank = every model in scripts/ci/ppu_e2e_models.json)
         required: false
-        default: qwen3.8-27b
+        default: qwen3.8-27b,qwen3.8-27b-m890p
         type: string
       image:
         description: SAIL runtime image for the PPU pods
