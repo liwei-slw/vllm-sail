@@ -109,11 +109,30 @@ code runs with read-only permissions, no inherited secrets, disabled cache
 access and an explicitly verified checkout SHA. Authorization and reporting
 run separately on GitHub-hosted runners using default-branch code.
 
-CPU checks still run automatically. PPU CI for PRs is requested through the
-commands above; opening a PR or pushing a commit does not start it automatically.
+CPU checks still run automatically. The formal `PPU CI` check for PRs is requested
+through the commands above; opening a PR or pushing a commit does not start it.
 Manually dispatch PPU ops tests (`ppu-ops-tests.yaml`) in GitHub Actions for
 operator tests. Dispatch PPU debug (`ppu-debug.yaml`) to rerun pin UT and/or
 model tests on existing builds.
+
+The separate `PPU workflow preview` (`ppu-pr-preview.yaml`) receives PR events
+for workflow or `scripts/ci/` changes targeting `main`. For non-draft PRs, a
+GitHub-hosted job checks the triggering user's repository permission: `write`,
+`maintain` or `admin` is required. PR authors with write permission can run their
+own previews without a second approver. The check uses the user initiating a
+rerun rather than the original actor, and permission lookup failures block
+execution. No approval environment is required. Unlike `/ci run`, preview does
+not delegate access through ready labels, reviews or `CI_TRUSTED_USERS`.
+
+Preview uses the PR merge commit for both workflow definitions and source,
+builds fresh wheels, and runs pin UT and model tests. A newer run cancels an
+older preview for the same PR. Preview results do not publish or replace the
+formal `PPU CI` commit status, and `/ci retry` and `/ci cancel` do not manage them;
+repository writers can use GitHub's Re-run controls instead.
+
+Preview reuses the team-controlled runner and device pools under the same
+resource trust model as the formal PPU CI. Its PR-controlled permission check
+is an operational guard, not a sandbox for arbitrary untrusted workflow changes.
 
 Repository administrators must require the `PPU CI` commit status from GitHub
 Actions instead of the individual PPU build, pin UT, smoke and gate job checks.

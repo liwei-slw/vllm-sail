@@ -6,7 +6,10 @@ import re
 import shlex
 import subprocess
 import sys
+import urllib.error
+import urllib.request
 import zipfile
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -192,6 +195,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
         "_ppu-model-tests.yaml",
         "ppu-ops-tests.yaml",
         "ppu-debug.yaml",
+        "ppu-pr-preview.yaml",
     ],
 )
 def test_untrusted_workflows_have_no_write_permissions_or_inherited_secrets(name):
@@ -483,10 +487,203 @@ def test_obsolete_workflow_paths_are_absent(name):
     assert not (WORKFLOWS / name).exists(), name
 
 
-def test_ppu_workflows_have_no_pull_request_routes():
+def test_only_preview_has_a_ppu_pull_request_route():
     for path in WORKFLOWS.glob("*.y*ml"):
-        if path.name.startswith(("_ppu-", "ppu-")):
+        if path.name == "ppu-pr-preview.yaml":
+            assert set(workflow(path.name)[True]) == {"pull_request"}
+        elif path.name.startswith(("_ppu-", "ppu-")):
             assert "pull_request" not in path.read_text(), path.name
+
+
+def test_preview_only_receives_ci_pull_requests():
+    config = workflow("ppu-pr-preview.yaml")
+    assert config["name"] == "PPU workflow preview"
+    assert config["run-name"] == (
+        "PPU preview PR #${{ github.event.pull_request.number }} @ ${{ github.sha }}"
+    )
+    assert config[True] == {
+        "pull_request": {
+            "branches": ["main"],
+            "types": ["opened", "synchronize", "reopened", "ready_for_review"],
+            "paths": [".github/workflows/**", "scripts/ci/**"],
+        }
+    }
+    assert set(config["jobs"]) == {"authorize", "ppu"}
+    assert all("environment" not in job for job in config["jobs"].values())
+
+
+def test_preview_authorization_uses_a_read_only_hosted_job():
+    authorize = workflow("ppu-pr-preview.yaml")["jobs"].get("authorize")
+    assert authorize is not None
+    assert authorize["name"] == "Authorize PPU preview"
+    assert authorize["runs-on"] == "ubuntu-latest"
+    assert authorize["permissions"] == {"contents": "read"}
+    assert authorize["timeout-minutes"] == 5
+    assert "continue-on-error" not in authorize
+    assert len(authorize["steps"]) == 1
+    step = authorize["steps"][0]
+    assert "uses" not in step
+    assert "continue-on-error" not in step
+    assert step["env"] == {
+        "GH_TOKEN": "${{ github.token }}",
+        "API_URL": "${{ github.api_url }}",
+        "REPOSITORY": "${{ github.repository }}",
+        "REQUESTER": "${{ github.triggering_actor }}",
+    }
+    assert "${{" not in step["run"]
+    assert step["run"].startswith("python - <<'PYTHON'\n")
+    assert step["run"].endswith("PYTHON\n")
+
+
+def run_preview_authorization(monkeypatch):
+    authorize = workflow("ppu-pr-preview.yaml")["jobs"].get("authorize")
+    assert authorize is not None
+    step = authorize["steps"][0]
+    context = {
+        "github.token": "test-token",
+        "github.api_url": "https://api.github.com",
+        "github.repository": "t-head/vllm-sail",
+        "github.actor": "original-writer",
+        "github.triggering_actor": "pr-author",
+        "github.event.pull_request.user.login": "pr-author",
+    }
+    for key, value in step["env"].items():
+        monkeypatch.setenv(key, expression(value, context))
+    script = step["run"].removeprefix("python - <<'PYTHON'\n").removesuffix("PYTHON\n")
+    exec(compile(script, "preview-authorization", "exec"), {})
+
+
+@pytest.mark.parametrize(
+    "permission,allowed",
+    [
+        ("write", True),
+        ("maintain", True),
+        ("admin", True),
+        ("read", False),
+        ("triage", False),
+        ("none", False),
+        (None, False),
+    ],
+)
+def test_preview_checks_actual_requester_write_permission(
+    monkeypatch, capsys, permission, allowed
+):
+    def urlopen(request, timeout):
+        assert request.full_url == (
+            "https://api.github.com/repos/t-head/vllm-sail/"
+            "collaborators/pr-author/permission"
+        )
+        assert request.get_method() == "GET"
+        assert request.get_header("Authorization") == "Bearer test-token"
+        assert timeout == 30
+        return BytesIO(json.dumps({"permission": permission}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    if allowed:
+        run_preview_authorization(monkeypatch)
+    else:
+        with pytest.raises(SystemExit, match="write permission"):
+            run_preview_authorization(monkeypatch)
+    captured = capsys.readouterr()
+    assert "test-token" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        urllib.error.HTTPError("https://api.github.com", 403, "Forbidden", {}, None),
+        urllib.error.HTTPError("https://api.github.com", 404, "Not Found", {}, None),
+        urllib.error.HTTPError("https://api.github.com", 500, "Server Error", {}, None),
+        TimeoutError("API request timed out"),
+    ],
+)
+def test_preview_permission_lookup_errors_never_authorize(monkeypatch, error):
+    def urlopen(request, timeout):
+        raise error
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    with pytest.raises(type(error)):
+        run_preview_authorization(monkeypatch)
+
+
+@pytest.mark.parametrize("draft", [False, True])
+def test_preview_drafts_do_not_request_authorization(draft):
+    authorize = workflow("ppu-pr-preview.yaml")["jobs"].get("authorize")
+    assert authorize is not None
+    assert authorize["if"] == "${{ !github.event.pull_request.draft }}"
+    assert bool(
+        expression(authorize["if"], {"github.event.pull_request.draft": draft})
+    ) is (not draft)
+
+
+def test_preview_calls_pr_pipeline_only_after_authorization_without_wheel_reuse():
+    ppu = workflow("ppu-pr-preview.yaml")["jobs"]["ppu"]
+    assert ppu["name"] == "PPU preview"
+    assert ppu["needs"] == "authorize"
+    assert "if" not in ppu
+    assert "continue-on-error" not in ppu
+    assert "steps" not in ppu
+    assert "runs-on" not in ppu
+    assert ppu["uses"] == "./.github/workflows/_ppu-pr-pipeline.yaml"
+    assert ppu["permissions"] == {"contents": "read", "actions": "read"}
+    assert ppu["with"] == {
+        "pr_head_sha": "${{ github.sha }}",
+        "existing_build_run_id": "",
+        "wheel_source_sha": "",
+    }
+
+
+def test_preview_cancellation_is_per_pr_and_separate_from_the_executor():
+    concurrency = workflow("ppu-pr-preview.yaml")["concurrency"]
+    assert concurrency == {
+        "group": "ppu-workflow-preview-${{ github.event.pull_request.number }}",
+        "cancel-in-progress": True,
+    }
+    groups = []
+    for number in (49, 50):
+        context = {"github.event.pull_request.number": number}
+        group = re.sub(
+            r"\$\{\{.*?\}\}",
+            lambda match, context=context: str(expression(match[0], context)),
+            concurrency["group"],
+        )
+        assert group != f"ppu-pr-ci-{number}"
+        assert group != f"ppu-ci-command-{number}"
+        groups.append(group)
+    assert len(set(groups)) == 2
+
+
+@pytest.mark.parametrize(
+    "caller_id,leaf_name,job_ids",
+    [
+        ("build", "_ppu-build.yaml", ["build"]),
+        ("pin-unit-tests", "_ppu-pin-ut.yaml", ["pin-unit-tests"]),
+        ("model-tests", "_ppu-model-tests.yaml", ["prepare", "e2e"]),
+    ],
+)
+def test_preview_propagates_merge_sha_to_build_and_test_checkouts(
+    caller_id, leaf_name, job_ids
+):
+    merge_sha, head_sha = "a" * 40, "b" * 40
+    context = {"github.sha": merge_sha, "github.event.pull_request.head.sha": head_sha}
+    supplied = workflow("ppu-pr-preview.yaml")["jobs"]["ppu"]["with"]
+    for key, value in supplied.items():
+        context[f"inputs.{key}"] = expression(value, context) if value else value
+    pipeline = workflow("_ppu-pr-pipeline.yaml")["jobs"]
+    assert expression(pipeline["build"]["if"], context)
+    caller = pipeline[caller_id]
+    assert caller["uses"] == f"./.github/workflows/{leaf_name}"
+    context["inputs.pr_head_sha"] = expression(caller["with"]["pr_head_sha"], context)
+    assert context["inputs.pr_head_sha"] == merge_sha
+    if caller_id != "build":
+        assert caller["with"]["pr_mode"] is True
+        assert expression(caller["with"]["wheel_source_sha"], context) == ""
+    for job_id in job_ids:
+        job = workflow(leaf_name)["jobs"][job_id]
+        checkout = checkouts(job)[0]
+        assert expression(checkout["with"]["ref"], context) == merge_sha
+        verify = job["steps"][job["steps"].index(checkout) + 1]
+        assert expression(verify["env"]["EXPECTED_SHA"], context) == merge_sha
 
 
 @pytest.mark.parametrize(
@@ -786,6 +983,39 @@ def wheel_artifacts(tmp_path):
 @pytest.mark.parametrize(
     "pr_mode,event,build_id,source,head,actual,wrong_pin,passes",
     [
+        pytest.param(
+            True,
+            "pull_request",
+            "200",
+            "",
+            "d",
+            "d",
+            False,
+            True,
+            id="preview-merge-sha",
+        ),
+        pytest.param(
+            True,
+            "pull_request",
+            "200",
+            "",
+            "d",
+            "b",
+            False,
+            False,
+            id="preview-rejects-pr-head-sha",
+        ),
+        pytest.param(
+            True,
+            "pull_request",
+            "200",
+            "",
+            "d",
+            "d",
+            True,
+            False,
+            id="preview-rejects-wrong-upstream-pin",
+        ),
         (True, "workflow_dispatch", "200", "", "b", "b", False, True),
         (True, "workflow_dispatch", "200", "", "b", "c", False, False),
         (True, "workflow_dispatch", "123", "a", "b", "a", False, True),
@@ -830,6 +1060,7 @@ def test_manifest_shell_checks_actual_source_and_current_pin(
         "inputs.wheel_source_sha": source * 40,
         "inputs.pr_head_sha": head * 40,
         "github.sha": "d" * 40,
+        "github.event.pull_request.head.sha": "b" * 40,
     }
     env = {
         "PATH": str(Path(sys.executable).parent) + os.pathsep + os.defpath,

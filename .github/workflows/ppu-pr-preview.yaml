@@ -1,0 +1,70 @@
+name: PPU workflow preview
+run-name: "PPU preview PR #${{ github.event.pull_request.number }} @ ${{ github.sha }}"
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - ".github/workflows/**"
+      - "scripts/ci/**"
+
+permissions:
+  contents: read
+  actions: read
+
+cache-mode: none
+
+concurrency:
+  group: ppu-workflow-preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  authorize:
+    name: Authorize PPU preview
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require repository write permission
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_URL: ${{ github.api_url }}
+          REPOSITORY: ${{ github.repository }}
+          REQUESTER: ${{ github.triggering_actor }}
+        run: |
+          python - <<'PYTHON'
+          import json
+          import os
+          import urllib.parse
+          import urllib.request
+
+          requester = os.environ["REQUESTER"]
+          login = urllib.parse.quote(requester, safe="")
+          url = (f"{os.environ['API_URL']}/repos/{os.environ['REPOSITORY']}"
+                 f"/collaborators/{login}/permission")
+          request = urllib.request.Request(url, headers={
+              "Authorization": f"Bearer {os.environ['GH_TOKEN']}",
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+          })
+          with urllib.request.urlopen(request, timeout=30) as response:
+              permission = json.load(response).get("permission")
+          print(f"Preview requester: {requester}; permission: {permission}")
+          if permission not in {"write", "maintain", "admin"}:
+              raise SystemExit("Repository write permission is required for PPU preview")
+          PYTHON
+
+  ppu:
+    name: PPU preview
+    needs: authorize
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/_ppu-pr-pipeline.yaml
+    with:
+      pr_head_sha: ${{ github.sha }}
+      existing_build_run_id: ""
+      wheel_source_sha: ""
