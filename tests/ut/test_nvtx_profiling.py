@@ -468,6 +468,50 @@ def test_engine_core_steps_carry_iteration_ranges(installed, recording_nvtx) -> 
     assert core.iteration == 2
 
 
+@pytest.mark.parametrize("step_name", ["step", "step_with_batch_queue"])
+def test_engine_core_loads_profiling_during_init(
+    profiling_pkg, nvtx_stub, fake_vllm, cleared_gate, monkeypatch, step_name
+) -> None:
+    monkeypatch.setenv("VLLM_SAIL_NVTX_PROFILE", "1")
+
+    def upstream_init(self):
+        profiling_pkg.install()
+        self.step_fn = getattr(self, step_name)
+
+    monkeypatch.setattr(fake_vllm.EngineCore, "__init__", upstream_init)
+
+    class EngineCoreProc(fake_vllm.EngineCore):
+        def __init__(self):
+            super().__init__()
+
+    core = EngineCoreProc()
+    assert profiling_pkg._installed
+    assert not hasattr(core, "iteration")
+
+    prof_nvtx = importlib.import_module("vllm_sail.profiling.nvtx")
+    events = []
+    monkeypatch.setattr(
+        prof_nvtx, "_model_prof_iter", lambda i: events.append(("iter", i))
+    )
+    monkeypatch.setattr(
+        prof_nvtx, "_torch_range_push", lambda label: events.append(("push", label))
+    )
+    monkeypatch.setattr(prof_nvtx, "_torch_range_pop", lambda: events.append(("pop",)))
+
+    for iteration in range(2):
+        assert core.step_fn() == (step_name,)
+        assert core.iteration == iteration + 1
+
+    assert events == [
+        ("iter", 0),
+        ("push", "[prof_range]: iter 0"),
+        ("pop",),
+        ("iter", 1),
+        ("push", "[prof_range]: iter 1"),
+        ("pop",),
+    ]
+
+
 def test_scheduler_schedule_is_annotated_and_update_marks(installed) -> None:
     scheduler = installed.fakes.Scheduler()
 
