@@ -1,6 +1,18 @@
 name: PPU workflow preview
 run-name: "PPU preview PR #${{ github.event.pull_request.number }} @ ${{ github.sha }}"
 
+# The formal ready-label and /ci command path dispatches ppu-pr-ci.yaml from the
+# default branch, so it deliberately cannot exercise workflow definitions changed
+# by a PR. This separate entry point runs the PR merge commit to close that test
+# gap without changing the trusted command, validation, reporting, retry or cancel
+# control plane.
+#
+# This file and the reusable workflows it calls are PR-controlled. Repository and
+# organization fork-run approval plus runner admission policies are the actual
+# trust boundary. The writer check below is defense in depth and an operational
+# guard; it is not an independent sandbox. A ready label only delegates use of the
+# default-branch /ci executor and intentionally does not authorize this preview.
+
 on:
   pull_request:
     branches: [main]

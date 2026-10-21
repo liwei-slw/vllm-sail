@@ -115,14 +115,19 @@ Manually dispatch PPU ops tests (`ppu-ops-tests.yaml`) in GitHub Actions for
 operator tests. Dispatch PPU debug (`ppu-debug.yaml`) to rerun pin UT and/or
 model tests on existing builds.
 
-The separate `PPU workflow preview` (`ppu-pr-preview.yaml`) receives PR events
-for workflow or `scripts/ci/` changes targeting `main`. For non-draft PRs, a
-GitHub-hosted job checks the triggering user's repository permission: `write`,
-`maintain` or `admin` is required. PR authors with write permission can run their
-own previews without a second approver. The check uses the user initiating a
-rerun rather than the original actor, and permission lookup failures block
-execution. No approval environment is required. Unlike `/ci run`, preview does
-not delegate access through ready labels, reviews or `CI_TRUSTED_USERS`.
+The formal command path intentionally loads its executor from the default
+branch, so `/ci run` tests PR source but cannot exercise workflow definitions
+changed by that PR. The separate `PPU workflow preview`
+(`ppu-pr-preview.yaml`) closes that gap for workflow or `scripts/ci/` changes
+targeting `main`.
+
+For non-draft PRs, a GitHub-hosted job checks the triggering user's repository
+permission: `write`, `maintain` or `admin` is required. PR authors with write
+permission can run their own previews without a second approver. The check uses
+the user initiating a rerun rather than the original actor, and permission
+lookup failures block execution. Unlike `/ci run`, preview does not delegate
+access through ready labels, reviews or `CI_TRUSTED_USERS`: those mechanisms
+only authorize use of the trusted default-branch executor.
 
 Preview uses the PR merge commit for both workflow definitions and source,
 builds fresh wheels, and runs pin UT and model tests. A newer run cancels an
@@ -130,9 +135,11 @@ older preview for the same PR. Preview results do not publish or replace the
 formal `PPU CI` commit status, and `/ci retry` and `/ci cancel` do not manage them;
 repository writers can use GitHub's Re-run controls instead.
 
-Preview reuses the team-controlled runner and device pools under the same
-resource trust model as the formal PPU CI. Its PR-controlled permission check
-is an operational guard, not a sandbox for arbitrary untrusted workflow changes.
+The preview workflow and the reusable workflows it calls are PR-controlled.
+Repository and organization fork-run approval plus runner admission policies
+are the actual trust boundary. The in-workflow writer check is defense in depth
+and an operational guard, not an independent sandbox. Preview reuses the
+team-controlled runner and device pools under that resource trust model.
 
 Repository administrators must require the `PPU CI` commit status from GitHub
 Actions instead of the individual PPU build, pin UT, smoke and gate job checks.
