@@ -58,7 +58,7 @@ jobs:
     permissions:
       contents: read
       actions: read
-    uses: ./.github/workflows/_ppu-pr-pipeline.yaml
+    uses: ./.github/workflows/ppu-pr-pipeline.yaml
     with:
       pr_head_sha: ${{ inputs.head_sha }}
       existing_build_run_id: ${{ needs.validate.outputs.existing_build_run_id }}

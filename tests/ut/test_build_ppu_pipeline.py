@@ -221,7 +221,7 @@ def test_all_ci_paths_use_the_same_pinned_image_stack():
     build = workflow["jobs"]["build"]
     assert image in build["container"]["image"]
     assert build["env"]["VLLM_SAIL_BUILD_IMAGE"] == build["container"]["image"]
-    pipeline = yaml.safe_load((WORKFLOW.parent / "_ppu-pr-pipeline.yaml").read_text())
+    pipeline = yaml.safe_load((WORKFLOW.parent / "ppu-pr-pipeline.yaml").read_text())
     for job in ("pin-unit-tests", "model-tests"):
         assert "needs.build.outputs.image" in pipeline["jobs"][job]["with"]["image"]
     for name in ("_ppu-pin-ut.yaml", "_ppu-model-tests.yaml", "ppu-debug.yaml"):

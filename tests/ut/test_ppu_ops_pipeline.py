@@ -441,7 +441,7 @@ def test_manual_detection_accepts_unapproved_environment(tmp_path, monkeypatch):
 
 def test_manual_workflow_does_not_change_pr_gate():
     pipeline = yaml.safe_load(
-        (ROOT / ".github/workflows/_ppu-pr-pipeline.yaml").read_text()
+        (ROOT / ".github/workflows/ppu-pr-pipeline.yaml").read_text()
     )["jobs"]
     assert pipeline["gate"]["needs"] == ["build", "pin-unit-tests", "model-tests"]
     assert not any("ops-" in job_id for job_id in pipeline)
