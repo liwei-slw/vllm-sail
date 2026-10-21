@@ -61,6 +61,7 @@ EXPECTED_ARCHITECTURES = {
     "DeepseekV4ForCausalLM",
     "DeepSeekV4MTPModel",
     "DSparkDraftModel",
+    "DSparkV41DraftModel",
     "GlmMoeDsaForCausalLM",
     "DeepseekV32MTPModel",
     "MiniMaxM3SparseForCausalLM",
@@ -137,6 +138,10 @@ def test_register_model_registers_expected_architectures(
     assert (
         registered["DSparkDraftModel"]
         == "vllm_sail.models.deepseek_v4.dspark:DSparkDeepseekV4ForCausalLM"
+    )
+    assert (
+        registered["DSparkV41DraftModel"]
+        == "vllm_sail.models.deepseek_v41.dspark:DSparkDeepseekV41ForCausalLM"
     )
 
 
@@ -280,7 +285,12 @@ def test_one_broken_model_does_not_break_the_hook(
 
 @pytest.mark.parametrize(
     "failed_arch",
-    ["DeepSeekV4MTPModel", "GlmMoeDsaForCausalLM", "DeepseekV32MTPModel"],
+    [
+        "DeepSeekV4MTPModel",
+        "DSparkV41DraftModel",
+        "GlmMoeDsaForCausalLM",
+        "DeepseekV32MTPModel",
+    ],
 )
 def test_required_registration_failure_is_transactional(
     fresh_models_package, fake_vllm: _RecordingRegistry, failed_arch

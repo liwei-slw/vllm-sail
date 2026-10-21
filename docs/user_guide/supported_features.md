@@ -89,6 +89,47 @@ checkpoint revision, quantization, context length, parallelism and SDK when
 reporting a successful model run. Newly compiled model-specific operations need
 numerical and model-level validation on each target device.
 
+### DeepSeek V4.1 checkpoint formats
+
+The PPU quantization override reuses upstream V4.1 dense and MoE dispatch.
+Select `--moe-backend ppu_deep_gemm` and set `VLLM_USE_DEEP_GEMM=1` for MXFP4
+routed experts. Dense precision follows the checkpoint:
+
+| Checkpoint | Dense layers |
+| --- | --- |
+| FP8 with `weight_block_size: [32, 32]` and `expert_dtype: fp4` | Upstream MXFP8 loading and [BF16 emulation](#mxfp8-dense-emulation), which increases resident dense-weight memory by default |
+| MXFP4 with an explicit `fp8_channelwise_layers` list | Listed layers use PPU FP8 kernels with FP32 per-output-channel weight scales and dynamic per-token activation scales; ignored and unlisted dense layers stay unquantized |
+
+Original block32 dense weights enter upstream's MXFP8 ModelOpt path when
+`weight_block_size` is `[32, 32]` and the resolved expert dtype selects E8M0
+scales. Loading expands checkpoint scales to per-row `[1, 32]` scales without
+changing their encoded bytes. The grouped `wo_a` BMM selector also falls back to
+emulation because its native MXFP8 DeepGEMM kernel requires Blackwell.
+
+Per-channel FP8 dense layers keep their original K, including the TP4
+shared-expert K576 shape, without blockwise K128 or N64 restrictions. Blockwise
+FP8 retains its own alignment requirements; neither path adds padding along K.
+DeepGEMM availability and BF16 output gates still apply.
+
+The mixed-format override accepts `expert_dtype: mxfp4` and normalizes the
+resolved target and draft configs to upstream's `fp4` spelling. It does not
+rewrite checkpoint files or requantize weights. Per-layer precision lists must
+include all shards of a fused projection; partial matches are rejected.
+DSpark retains its upstream loader and execution, but vLLM 0.31 draft execution
+also requires `fused_deepseek_v4_kv_rope_insert`, which is excluded from the
+current native build. Registration alone does not establish draft support.
+
+If multimodal encoder profiling crashes in the CPU MKL cosine path
+(`vmsCos` / `libmkl_gnu_thread`), retry with `OMP_NUM_THREADS=1` and
+`MKL_NUM_THREADS=1` set before starting vLLM. This is a process-level workaround
+for the affected SAIL PyTorch environment, not a change to the vision model.
+Verify both encoder profiling and an actual image request; passing a standalone
+CPU cosine test does not establish that the worker startup path is safe.
+
+These format adaptations do not establish checkpoint accuracy or full-model
+qualification. Requantizing block-scaled FP8 into per-channel FP8 is lossy;
+validate generated outputs and task accuracy for the exported checkpoint.
+
 ## Selecting a backend
 
 See [Configuration](configuration.md) for runtime choices and defaults. Build
