@@ -119,7 +119,7 @@ The formal command path intentionally loads its executor from the default
 branch, so `/ci run` tests PR source but cannot exercise workflow definitions
 changed by that PR. For changes under `.github/workflows/**` or `scripts/ci/**`,
 a repository maintainer can add the `ci-preview` label to opt the PR into the
-`pull_request` route in `ppu-pr-pipeline.yaml`. This label is separate from
+`pull_request` route in `ppu-build-and-test.yaml`. This label is separate from
 `ready` and `ready-run-all-tests`: those labels only authorize the PR author to
 use the trusted default-branch `/ci` executor.
 

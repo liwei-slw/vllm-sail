@@ -230,7 +230,7 @@ def test_e2e_workflow_only_exposes_model_smoke() -> None:
     ):
         assert marker not in text
     caller = yaml.safe_load(
-        (ROOT / ".github/workflows/ppu-pr-pipeline.yaml").read_text()
+        (ROOT / ".github/workflows/ppu-build-and-test.yaml").read_text()
     )
     assert caller["jobs"]["model-tests"]["uses"] == (
         "./.github/workflows/_ppu-model-tests.yaml"

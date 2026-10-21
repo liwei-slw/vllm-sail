@@ -151,7 +151,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     jobs = workflow("ppu-pr-ci.yaml")["jobs"]
     ppu = jobs["ppu"]
     assert ppu["needs"] == "validate"
-    assert ppu["uses"] == "./.github/workflows/ppu-pr-pipeline.yaml"
+    assert ppu["uses"] == "./.github/workflows/ppu-build-and-test.yaml"
     assert ppu["permissions"] == {"contents": "read", "actions": "read"}
     assert "secrets" not in ppu
     assert ppu["with"] == {
@@ -186,7 +186,7 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
 @pytest.mark.parametrize(
     "name",
     [
-        "ppu-pr-pipeline.yaml",
+        "ppu-build-and-test.yaml",
         "_ppu-build.yaml",
         "_ppu-pin-ut.yaml",
         "_ppu-model-tests.yaml",
@@ -295,7 +295,7 @@ def test_sha_verification_allows_different_owner_but_rejects_wrong_sha(
 
 
 def test_pr_pipeline_structure():
-    config = workflow("ppu-pr-pipeline.yaml")
+    config = workflow("ppu-build-and-test.yaml")
     assert set(config[True]) == {"workflow_call", "pull_request"}
     inputs = config[True]["workflow_call"]["inputs"]
     assert set(inputs) == {"pr_head_sha", "existing_build_run_id", "wheel_source_sha"}
@@ -463,7 +463,7 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
     assert build["outputs"] == {"image": "${{ steps.image.outputs.image }}"}
     assert "if" not in build
     assert "needs" not in build
-    caller = workflow("ppu-pr-pipeline.yaml")["jobs"]["build"]
+    caller = workflow("ppu-build-and-test.yaml")["jobs"]["build"]
     assert caller["uses"] == "./.github/workflows/_ppu-build.yaml"
     assert caller["with"] == {"pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}"}
 
@@ -471,7 +471,7 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
 def test_workflow_filenames_distinguish_reusable_calls_from_entrypoints():
     for path in WORKFLOWS.glob("*.y*ml"):
         triggers = workflow(path.name)[True]
-        if path.name == "ppu-pr-pipeline.yaml":
+        if path.name == "ppu-build-and-test.yaml":
             assert set(triggers) == {"workflow_call", "pull_request"}
         elif path.name.startswith("_"):
             assert set(triggers) == {"workflow_call"}, path.name
@@ -489,19 +489,19 @@ def test_obsolete_workflow_paths_are_absent(name):
 def test_pr_pipeline_is_the_only_ppu_pull_request_route():
     for path in WORKFLOWS.glob("*.y*ml"):
         triggers = workflow(path.name)[True]
-        if path.name == "ppu-pr-pipeline.yaml":
+        if path.name == "ppu-build-and-test.yaml":
             assert set(triggers) == {"workflow_call", "pull_request"}
         elif path.name.startswith(("_ppu-", "ppu-")):
             assert "pull_request" not in triggers, path.name
 
 
 def test_preview_route_requires_the_ci_preview_label():
-    config = workflow("ppu-pr-pipeline.yaml")
-    assert config["name"] == "PPU PR pipeline"
+    config = workflow("ppu-build-and-test.yaml")
+    assert config["name"] == "PPU build and test"
     assert config["run-name"] == (
         "${{ github.event_name == 'pull_request' && "
         "format('PPU preview PR #{0} @ {1}', github.event.pull_request.number, "
-        "github.sha) || 'PPU PR pipeline' }}"
+        "github.sha) || 'PPU build and test' }}"
     )
     assert config[True]["pull_request"] == {
         "branches": ["main"],
@@ -524,7 +524,7 @@ def test_preview_route_requires_the_ci_preview_label():
 
 
 def test_preview_label_is_distinct_from_formal_ready_authorization():
-    text = (WORKFLOWS / "ppu-pr-pipeline.yaml").read_text()
+    text = (WORKFLOWS / "ppu-build-and-test.yaml").read_text()
     assert "ci-preview" in text
     assert "ready and ready-run-all-tests continue to authorize only" in text
     for label in ("ready", "ready-run-all-tests"):
@@ -533,12 +533,12 @@ def test_preview_label_is_distinct_from_formal_ready_authorization():
 
 def config_preview_guards():
     return "\n".join(
-        job["if"] for job in workflow("ppu-pr-pipeline.yaml")["jobs"].values()
+        job["if"] for job in workflow("ppu-build-and-test.yaml")["jobs"].values()
     )
 
 
 def test_preview_cancellation_is_per_pr_and_formal_calls_are_isolated():
-    concurrency = workflow("ppu-pr-pipeline.yaml")["concurrency"]
+    concurrency = workflow("ppu-build-and-test.yaml")["concurrency"]
     assert (
         concurrency["cancel-in-progress"]
         == "${{ github.event_name == 'pull_request' }}"
@@ -555,7 +555,7 @@ def test_preview_cancellation_is_per_pr_and_formal_calls_are_isolated():
             lambda match, context=context: str(expression(match[0], context)),
             concurrency["group"],
         )
-        assert group == f"ppu-pr-pipeline-{number}"
+        assert group == f"ppu-build-and-test-{number}"
         groups.append(group)
     assert len(set(groups)) == 2
     formal = {
@@ -568,7 +568,7 @@ def test_preview_cancellation_is_per_pr_and_formal_calls_are_isolated():
         lambda match: str(expression(match[0], formal)),
         concurrency["group"],
     )
-    assert group == "ppu-pr-pipeline-901"
+    assert group == "ppu-build-and-test-901"
 
 
 @pytest.mark.parametrize(
@@ -595,7 +595,7 @@ def test_labeled_preview_propagates_merge_sha_to_build_and_test_checkouts(
         "inputs.wheel_source_sha": "",
         "needs.build.result": "success",
     }
-    pipeline = workflow("ppu-pr-pipeline.yaml")["jobs"]
+    pipeline = workflow("ppu-build-and-test.yaml")["jobs"]
     assert expression(pipeline["build"]["if"], context)
     caller = pipeline[caller_id]
     assert caller["uses"] == f"./.github/workflows/{leaf_name}"
@@ -616,7 +616,7 @@ def test_labeled_preview_propagates_merge_sha_to_build_and_test_checkouts(
     "labels,draft", [([], False), (["ready"], False), (["ci-preview"], True)]
 )
 def test_preview_jobs_skip_without_an_active_ci_preview_label(labels, draft):
-    jobs = workflow("ppu-pr-pipeline.yaml")["jobs"]
+    jobs = workflow("ppu-build-and-test.yaml")["jobs"]
     context = {
         "github.event_name": "pull_request",
         "github.event.pull_request.draft": draft,
@@ -730,7 +730,7 @@ def test_ops_partial_retry_downloads_diagnostics_from_successful_previous_attemp
 
 
 @pytest.mark.parametrize(
-    "name", ["ppu-pr-pipeline.yaml", "_ppu-pin-ut.yaml", "_ppu-model-tests.yaml"]
+    "name", ["ppu-build-and-test.yaml", "_ppu-pin-ut.yaml", "_ppu-model-tests.yaml"]
 )
 def test_wheel_source_is_optional_internal_input_only(name):
     triggers = workflow(name)[True]
@@ -831,7 +831,7 @@ def test_e2e_concurrency_isolates_reuse_consumers_only_in_pr_mode(pr_mode, event
 
 @pytest.fixture(scope="module")
 def build_jobs():
-    return workflow("ppu-pr-pipeline.yaml")["jobs"]
+    return workflow("ppu-build-and-test.yaml")["jobs"]
 
 
 @pytest.mark.parametrize("build", ["success", "failure", "cancelled", "skipped"])

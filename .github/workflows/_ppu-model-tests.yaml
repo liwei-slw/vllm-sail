@@ -1,6 +1,6 @@
 name: PPU model tests
 
-# Called by ppu-pr-pipeline.yaml and ppu-debug.yaml; use ppu-debug.yaml for manual debugging.
+# Called by ppu-build-and-test.yaml and ppu-debug.yaml; use ppu-debug.yaml for manual debugging.
 
 on:
   workflow_call:

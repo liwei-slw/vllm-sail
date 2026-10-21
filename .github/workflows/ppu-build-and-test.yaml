@@ -1,8 +1,8 @@
-name: PPU PR pipeline
+name: PPU build and test
 run-name: >-
   ${{ github.event_name == 'pull_request' &&
   format('PPU preview PR #{0} @ {1}', github.event.pull_request.number, github.sha) ||
-  'PPU PR pipeline' }}
+  'PPU build and test' }}
 
 # The formal ready-label and /ci command path dispatches ppu-pr-ci.yaml from the
 # default branch and calls this workflow through workflow_call. The ci-preview
@@ -44,7 +44,7 @@ cache-mode: none
 
 concurrency:
   group: >-
-    ppu-pr-pipeline-${{ github.event_name == 'pull_request' &&
+    ppu-build-and-test-${{ github.event_name == 'pull_request' &&
     github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
