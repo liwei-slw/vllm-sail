@@ -94,6 +94,8 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+# CPU and device suites can contain modules with the same basename.
+addopts = ["--import-mode=importlib"]
 markers = [
     "ppu: requires real PPU hardware (skipped when absent)",
     "upstream_source: checks the source selected by VLLM_SOURCE_ROOT without importing vLLM",
