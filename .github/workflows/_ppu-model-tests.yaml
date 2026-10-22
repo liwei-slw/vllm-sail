@@ -127,17 +127,6 @@ jobs:
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
 
-      - name: Require the expected wheel source and verified upstream pin
-        if: inputs.pr_mode
-        env:
-          WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}
-          WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
-        run: |
-          pin="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
-          [[ "${pin}" =~ ^[0-9a-f]{40}$ ]]
-          python3 scripts/ci/ppu_wheel_manifest.py verify "${WHEELS_DIR}" \
-            --vllm-commit "${pin}" --sail-commit "${WHEEL_SOURCE_SHA}"
-
       - name: Run PPU E2E smoke in the preloaded CUDA-compatible runtime
         env:
           PPU_RUNTIME_IMAGE: ${{ inputs.image }}
@@ -146,6 +135,8 @@ jobs:
           PPU_CI_WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}
           PPU_CI_ARTIFACT_DIR: ${{ steps.runtime.outputs.artifacts }}
           PPU_CI_DEVICE_COUNT: ${{ matrix.model.tp }}
+          PPU_CI_REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode }}
+          PPU_CI_WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
           MODEL_PATH: ${{ matrix.model.checkpoint }}
           SERVED_NAME: ${{ matrix.model.served_name }}
           TP_SIZE: ${{ matrix.model.tp }}

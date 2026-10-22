@@ -34,5 +34,8 @@ def test_runtime_wrapper_serializes_jobs_and_verifies_source_identity():
     assert "flock -n 9" in text
     assert "rev-parse HEAD" in text
     assert "PPU_CI_SOURCE_SHA" in text
+    assert ".github/vllm-main-verified.commit" in text
+    assert '--env EXPECTED_VLLM_COMMIT="${expected_vllm_commit}"' in text
+    assert '--env EXPECTED_SAIL_COMMIT="${expected_sail_commit}"' in text
     assert "docker stop --time=2" in text
     assert "docker rm --force" in text

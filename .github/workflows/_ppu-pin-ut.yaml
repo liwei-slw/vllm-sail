@@ -80,43 +80,7 @@ jobs:
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
 
-      - name: Verify wheel manifest and pin
-        id: manifest
-        env:
-          WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}
-          REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode }}
-          WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
-        run: |
-          python3 scripts/ci/ppu_wheel_manifest.py verify "${WHEELS_DIR}"
-          python3 - <<'PYTHON'
-          import json
-          import os
-          import re
-          import subprocess
-          from pathlib import Path
-
-          manifest = json.loads((Path(os.environ["WHEELS_DIR"]) / "wheel-manifest.json").read_text())
-          expected = Path(".github/vllm-main-verified.commit").read_text().strip()
-          if not re.fullmatch(r"[0-9a-f]{40}", expected):
-              raise SystemExit("main-verified must contain an immutable upstream commit SHA")
-          actual = manifest["commits"]["vllm"]
-          matches = actual == expected
-          if os.environ["REQUIRE_PR_ARTIFACT"] == "true":
-              cmd = ["python3", "scripts/ci/ppu_wheel_manifest.py", "verify", os.environ["WHEELS_DIR"],
-                     "--vllm-commit", expected, "--sail-commit", os.environ["WHEEL_SOURCE_SHA"]]
-              subprocess.run(cmd, check=True)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-              output.write(f"matches={str(matches).lower()}\n")
-          summary = f"main-verified: build={actual}, pin={expected}"
-          if not matches:
-              summary += "; UT skipped because this build does not contain that pin"
-              print(f"::notice::{summary}")
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
-              output.write(summary + "\n")
-          PYTHON
-
       - name: Run pin UT in the preloaded CUDA-compatible runtime
-        if: steps.manifest.outputs.matches == 'true'
         env:
           PPU_RUNTIME_IMAGE: ${{ inputs.image }}
           PPU_CI_SOURCE_DIR: ${{ github.workspace }}
@@ -124,6 +88,8 @@ jobs:
           PPU_CI_WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}
           PPU_CI_ARTIFACT_DIR: ${{ steps.runtime.outputs.artifacts }}
           PPU_CI_DEVICE_COUNT: "1"
+          PPU_CI_REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode }}
+          PPU_CI_WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
         run: bash scripts/ci/ppu_runtime_container.sh pin-ut
 
       - name: Upload pin UT diagnostics

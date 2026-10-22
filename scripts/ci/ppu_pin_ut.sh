@@ -11,7 +11,19 @@ exec > >(tee "${UT_RESULTS_DIR}/environment.log") 2>&1
 
 unset VLLM_VERSION PYTHONPATH
 export VLLM_USE_RUST_FRONTEND=0 VLLM_USE_RUST_BENCH=0
+REQUIRE_PR_ARTIFACT="${REQUIRE_PR_ARTIFACT:-false}"
+EXPECTED_VLLM_COMMIT="${EXPECTED_VLLM_COMMIT:?EXPECTED_VLLM_COMMIT is required}"
+EXPECTED_SAIL_COMMIT="${EXPECTED_SAIL_COMMIT:?EXPECTED_SAIL_COMMIT is required}"
 python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}"
+if [[ "${REQUIRE_PR_ARTIFACT}" == "true" ]]; then
+    python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}" \
+        --vllm-commit "${EXPECTED_VLLM_COMMIT}" \
+        --sail-commit "${EXPECTED_SAIL_COMMIT}"
+elif ! python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}" \
+    --vllm-commit "${EXPECTED_VLLM_COMMIT}"; then
+    echo "PPU PIN UT SKIP: build does not contain the current main-verified vLLM pin"
+    exit 0
+fi
 
 # Copy the read-only wheel mount outside the checkout so packaging UT does not
 # copy the large wheels into its temporary source trees.

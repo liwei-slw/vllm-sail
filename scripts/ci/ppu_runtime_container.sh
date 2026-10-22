@@ -15,6 +15,7 @@ esac
 : "${PPU_CI_WHEELS_DIR:?PPU_CI_WHEELS_DIR is required}"
 : "${PPU_CI_ARTIFACT_DIR:?PPU_CI_ARTIFACT_DIR is required}"
 : "${PPU_CI_DEVICE_COUNT:?PPU_CI_DEVICE_COUNT is required}"
+: "${PPU_CI_REQUIRE_PR_ARTIFACT:?PPU_CI_REQUIRE_PR_ARTIFACT is required}"
 
 source_dir=$(realpath "${PPU_CI_SOURCE_DIR}")
 wheels_dir=$(realpath "${PPU_CI_WHEELS_DIR}")
@@ -26,6 +27,18 @@ git -C "${source_dir}" rev-parse --is-inside-work-tree >/dev/null
     exit 2
 }
 [[ -d "${wheels_dir}" ]] || { echo "PPU CI wheel directory is missing" >&2; exit 2; }
+[[ "${PPU_CI_REQUIRE_PR_ARTIFACT}" =~ ^(true|false)$ ]] || {
+    echo "PPU_CI_REQUIRE_PR_ARTIFACT must be true or false" >&2
+    exit 2
+}
+expected_vllm_commit=$(tr -d '[:space:]' < "${source_dir}/.github/vllm-main-verified.commit")
+expected_sail_commit="${PPU_CI_WHEEL_SOURCE_SHA:-${PPU_CI_SOURCE_SHA}}"
+for commit in "${expected_vllm_commit}" "${expected_sail_commit}"; do
+    [[ "${commit}" =~ ^[0-9a-f]{40}$ ]] || {
+        echo "PPU CI expected commits must be immutable SHA-1 values" >&2
+        exit 2
+    }
+done
 [[ "${PPU_CI_DEVICE_COUNT}" =~ ^[1-8]$ ]] || {
     echo "PPU_CI_DEVICE_COUNT must be between 1 and 8" >&2
     exit 2
@@ -96,6 +109,9 @@ create=(
     --env CUDA_VISIBLE_DEVICES="${visible_csv}"
     --env PYTHONPYCACHEPREFIX=/tmp/pycache
     --env WHEELS_DIR=/wheels
+    --env REQUIRE_PR_ARTIFACT="${PPU_CI_REQUIRE_PR_ARTIFACT}"
+    --env EXPECTED_VLLM_COMMIT="${expected_vllm_commit}"
+    --env EXPECTED_SAIL_COMMIT="${expected_sail_commit}"
 )
 create+=("${device_args[@]}")
 

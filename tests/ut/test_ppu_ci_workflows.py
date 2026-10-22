@@ -4,8 +4,6 @@ import json
 import os
 import re
 import subprocess
-import sys
-import zipfile
 from pathlib import Path
 
 import pytest
@@ -667,24 +665,30 @@ def test_debug_targets_select_requested_consumers(target, expected):
     )
 
 
-def test_pr_wheel_verification_uses_explicit_sha_and_is_not_skippable():
-    pin = workflow("_ppu-pin-ut.yaml")["jobs"]["pin-unit-tests"]
-    verify = next(step for step in pin["steps"] if step.get("id") == "manifest")
-    assert verify["env"]["REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
+def test_pr_wheel_verification_runs_inside_the_runtime_container():
     source = "${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}"
-    assert verify["env"]["WHEEL_SOURCE_SHA"] == source
-    assert "EXISTING_BUILD_RUN_ID" not in verify["run"]
-    e2e = workflow("_ppu-model-tests.yaml")["jobs"]["e2e"]
-    verifications = [
-        step for step in e2e["steps"] if "ppu_wheel_manifest.py" in step.get("run", "")
-    ]
-    assert len(verifications) == 1
-    verify = verifications[0]
-    assert verify["if"] == "inputs.pr_mode"
-    assert verify["env"]["WHEEL_SOURCE_SHA"] == source
-    for job in (pin, e2e):
-        for step in job["steps"]:
-            assert "${{ inputs.wheel_source_sha" not in step.get("run", "")
+    for workflow_name, job_id in (
+        ("_ppu-pin-ut.yaml", "pin-unit-tests"),
+        ("_ppu-model-tests.yaml", "e2e"),
+    ):
+        job = workflow(workflow_name)["jobs"][job_id]
+        assert not any(
+            "ppu_wheel_manifest.py" in step.get("run", "") for step in job["steps"]
+        )
+        runtime = next(
+            step
+            for step in job["steps"]
+            if "ppu_runtime_container.sh" in step.get("run", "")
+        )
+        assert runtime["env"]["PPU_CI_REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
+        assert runtime["env"]["PPU_CI_WHEEL_SOURCE_SHA"] == source
+
+    pin_script = (ROOT / "scripts/ci/ppu_pin_ut.sh").read_text()
+    model_script = (ROOT / "scripts/ci/ppu_e2e_smoke.sh").read_text()
+    for script in (pin_script, model_script):
+        assert '--vllm-commit "${EXPECTED_VLLM_COMMIT}"' in script
+        assert '--sail-commit "${EXPECTED_SAIL_COMMIT}"' in script
+    assert "PPU PIN UT SKIP" in pin_script
 
 
 def test_retry_reuses_build_artifacts_but_keeps_pin_diagnostics_per_attempt():
@@ -922,171 +926,6 @@ def test_gate_executes_fail_closed_truth_table(
     assert passed is expected
 
 
-@pytest.fixture
-def wheel_artifacts(tmp_path):
-    from scripts.ci.ppu_wheel_manifest import wheel_records
-
-    wheels = tmp_path / "wheels"
-    wheels.mkdir()
-    for package in ("vllm", "vllm_sail"):
-        with zipfile.ZipFile(
-            wheels / f"{package}-1.0-py3-none-any.whl", "w"
-        ) as archive:
-            archive.writestr(
-                f"{package}-1.0.dist-info/METADATA", f"Name: {package}\nVersion: 1.0\n"
-            )
-            if package == "vllm":
-                archive.writestr("vllm/vllm-rs", "test executable")
-                archive.writestr("vllm/_rust_tool_parser.abi3.so", "test extension")
-            else:
-                for module in ("_C", "_moe_C", "_upstream_C", "_upstream_moe_C"):
-                    archive.writestr(f"vllm_sail/{module}.abi3.so", "test extension")
-    (tmp_path / "scripts").symlink_to(ROOT / "scripts", target_is_directory=True)
-    (tmp_path / ".github").mkdir()
-    pin = (ROOT / ".github/vllm-main-verified.commit").read_text().strip()
-    (tmp_path / ".github/vllm-main-verified.commit").write_text(pin + "\n")
-    return wheels, {
-        "schema": 1,
-        "wheels": wheel_records(wheels),
-        "commits": {"vllm": pin},
-    }
-
-
-@pytest.mark.parametrize(
-    "name,job_id",
-    [("_ppu-pin-ut.yaml", "pin-unit-tests"), ("_ppu-model-tests.yaml", "e2e")],
-)
-@pytest.mark.parametrize("legacy_override", ["", "999"])
-@pytest.mark.parametrize(
-    "pr_mode,event,build_id,source,head,actual,wrong_pin,passes",
-    [
-        pytest.param(
-            True,
-            "pull_request",
-            "200",
-            "",
-            "d",
-            "d",
-            False,
-            True,
-            id="preview-merge-sha",
-        ),
-        pytest.param(
-            True,
-            "pull_request",
-            "200",
-            "",
-            "d",
-            "b",
-            False,
-            False,
-            id="preview-rejects-pr-head-sha",
-        ),
-        pytest.param(
-            True,
-            "pull_request",
-            "200",
-            "",
-            "d",
-            "d",
-            True,
-            False,
-            id="preview-rejects-wrong-upstream-pin",
-        ),
-        (True, "workflow_dispatch", "200", "", "b", "b", False, True),
-        (True, "workflow_dispatch", "200", "", "b", "c", False, False),
-        (True, "workflow_dispatch", "123", "a", "b", "a", False, True),
-        (True, "workflow_dispatch", "123", "a", "b", "b", False, False),
-        (True, "workflow_dispatch", "123", "a", "b", "c", False, False),
-        (True, "workflow_dispatch", "123", "a", "b", "a", True, False),
-        (True, "workflow_dispatch", "999", "", "b", "a", False, False),
-        (True, "workflow_dispatch", "999", "", "b", "b", False, True),
-        (True, "workflow_dispatch", "999", "", "", "c", False, False),
-        (True, "workflow_dispatch", "200", "", "", "d", False, True),
-        (True, "workflow_dispatch", "200", "", "", "c", False, False),
-        (True, "workflow_dispatch", "200", "", "", "d", True, False),
-        (False, "workflow_dispatch", "123", "", "", "a", False, True),
-        (False, "workflow_dispatch", "123", "", "", "a", True, True),
-    ],
-)
-def test_manifest_shell_checks_actual_source_and_current_pin(
-    name,
-    job_id,
-    legacy_override,
-    pr_mode,
-    event,
-    build_id,
-    source,
-    head,
-    actual,
-    wrong_pin,
-    passes,
-    wheel_artifacts,
-    tmp_path,
-):
-    wheels, data = wheel_artifacts
-    data["commits"]["vllm-sail"] = actual * 40
-    if wrong_pin:
-        data["commits"]["vllm"] = "e" * 40
-    (wheels / "wheel-manifest.json").write_text(json.dumps(data))
-    context = {
-        "inputs.pr_mode": pr_mode,
-        "github.event_name": event,
-        "inputs.build_run_id": build_id,
-        "github.run_id": "200",
-        "inputs.wheel_source_sha": source * 40,
-        "inputs.pr_head_sha": head * 40,
-        "github.sha": "d" * 40,
-        "github.event.pull_request.head.sha": "b" * 40,
-        "steps.runtime.outputs.wheels": str(wheels),
-    }
-    env = {
-        "PATH": str(Path(sys.executable).parent) + os.pathsep + os.defpath,
-        "WHEELS_DIR": str(wheels),
-        "GITHUB_OUTPUT": str(tmp_path / "output"),
-        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary"),
-        # Even a stale inherited variable must never bypass SAIL verification.
-        "EXISTING_BUILD_RUN_ID": legacy_override,
-    }
-    steps = [
-        step
-        for step in workflow(name)["jobs"][job_id]["steps"]
-        if "ppu_wheel_manifest.py" in step.get("run", "")
-    ]
-    executed = 0
-    for step in steps:
-        if "if" in step and not expression(step["if"], context):
-            continue
-        executed += 1
-        for key, value in step.get("env", {}).items():
-            resolved = expression(value, context)
-            env[key] = str(resolved).lower() if isinstance(resolved, bool) else resolved
-        result = subprocess.run(
-            [
-                "/bin/bash",
-                "--noprofile",
-                "--norc",
-                "-eo",
-                "pipefail",
-                "-c",
-                step["run"],
-            ],
-            cwd=tmp_path,
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        assert (result.returncode == 0) is passes, result.stdout + result.stderr
-        if not passes:
-            assert "source commit differs" in result.stderr
-    assert executed == (1 if name == "_ppu-pin-ut.yaml" or pr_mode else 0)
-    if name == "_ppu-pin-ut.yaml" and passes:
-        assert (
-            tmp_path / "output"
-        ).read_text() == f"matches={str(not wrong_pin).lower()}\n"
-
-
 def test_runtime_workflows_use_the_checked_in_docker_wrapper():
     pin = workflow("_ppu-pin-ut.yaml")["jobs"]["pin-unit-tests"]
     model = workflow("_ppu-model-tests.yaml")["jobs"]["e2e"]
@@ -1103,8 +942,10 @@ def test_runtime_workflows_use_the_checked_in_docker_wrapper():
     assert pin_step["run"] == "bash scripts/ci/ppu_runtime_container.sh pin-ut"
     assert pin_step["env"]["PPU_CI_DEVICE_COUNT"] == "1"
     assert pin_step["env"]["PPU_RUNTIME_IMAGE"] == "${{ inputs.image }}"
+    assert pin_step["env"]["PPU_CI_REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
     assert model_step["run"] == "bash scripts/ci/ppu_runtime_container.sh model-test"
     assert model_step["env"]["PPU_CI_DEVICE_COUNT"] == "${{ matrix.model.tp }}"
+    assert model_step["env"]["PPU_CI_REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
     assert model_step["env"]["MODEL_PATH"] == "${{ matrix.model.checkpoint }}"
     assert "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-pin-ut.yaml").read_text()
     assert (
