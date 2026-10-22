@@ -643,8 +643,8 @@ def test_ppu_compat_supplies_cudacc_but_not_cuda_arch_on_the_host_pass(
     )
 
 
-def test_ppu_compat_masks_the_nvidia_scalar_headers(tmp_path: Path) -> None:
-    """A stock Torch includes NVIDIA's scalar headers under __CUDACC__."""
+def test_ppu_compat_resolves_stock_torch_cuda_headers(tmp_path: Path) -> None:
+    """Stock torch requests CUDA scalar headers and the driver version macro."""
     compiler = _tool("c++")
     sdk = tmp_path / "sdk"
     _write_native_sdk_stubs(sdk)
@@ -653,6 +653,8 @@ def test_ppu_compat_masks_the_nvidia_scalar_headers(tmp_path: Path) -> None:
         '#include "ppu_compat.h"\n'
         "#include <cuda_fp16.h>\n"
         "#include <cuda_bf16.h>\n"
+        "#include <cuda.h>\n"
+        "static_assert(CUDA_VERSION == COMPATIBLE_VERSION);\n"
         "#ifndef __CUDA_FP16_H__\n"
         "#error NVIDIA cuda_fp16.h would redefine the native half types\n"
         "#endif\n"
