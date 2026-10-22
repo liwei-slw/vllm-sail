@@ -30,7 +30,7 @@ cache-mode: none
 jobs:
   pin-unit-tests:
     name: main-verified
-    runs-on: k8s-runner-group-cpu-thead
+    runs-on: 8-ppu-m890p
     timeout-minutes: 30
     container:
       image: ${{ inputs.image }}
@@ -45,7 +45,7 @@ jobs:
       - name: Disable internal GitHub mirror rewrite
         shell: bash
         run: |
-          # The self-hosted CPU runner image ships a global/system git
+          # The job container image ships a global/system git
           # url.<internal-mirror>.insteadOf = https://github.com rewrite. Left in
           # place it makes actions/checkout fetch from the internal mirror and
           # fail, so strip only the github.com rewrites before checkout.

@@ -86,7 +86,7 @@ jobs:
 
   ops-build:
     needs: detect-ops-changes
-    runs-on: k8s-runner-group-cpu-thead
+    runs-on: 8-ppu-m890p
     timeout-minutes: 180
     container:
       image: ${{ needs.detect-ops-changes.outputs.build_image }}

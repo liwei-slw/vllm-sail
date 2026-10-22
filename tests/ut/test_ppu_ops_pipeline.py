@@ -512,7 +512,7 @@ def test_reusable_workflow_contract():
     assert workflow["permissions"] == {"contents": "read", "actions": "read"}
     jobs = workflow["jobs"]
     device = jobs["ops-tests"]
-    assert device["runs-on"] == "k8s-runner-group-cpu-thead"
+    assert device["runs-on"] == "8-ppu-m890p"
     assert device["container"]["image"] == "${{ inputs.image }}"
     assert device["timeout-minutes"] == 90
     assert device["strategy"]["fail-fast"] is False

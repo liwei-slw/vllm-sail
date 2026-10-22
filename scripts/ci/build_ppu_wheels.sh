@@ -13,7 +13,7 @@ VLLM_REPOSITORY="${VLLM_REPOSITORY:-https://github.com/vllm-project/vllm.git}"
 VLLM_REF="${VLLM_REF:-$(tr -d '[:space:]' < "${ROOT_DIR}/.github/vllm-main-verified.commit")}"
 PYTORCH_SAIL_ARCH="${PYTORCH_SAIL_ARCH:-ppu_15;ppu_10}"
 # Building the native PPU kernels is memory-heavy (~2 GiB per compile job). The
-# CPU runner exposes many cores but a smaller memory limit, so an unbounded
+# The CI build environment exposes many cores but a smaller memory limit, so an unbounded
 # MAX_JOBS makes the OOM killer terminate the pod (exit 137). Derive a safe
 # default from the cgroup memory limit (falling back to MemTotal) and apply a
 # conservative ceiling. Override explicitly with BUILD_JOBS.
@@ -90,7 +90,7 @@ unset SETUPTOOLS_SCM_PRETEND_VERSION SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM
 unset VLLM_USE_PRECOMPILED VLLM_USE_PRECOMPILED_RUST
 unset VLLM_PRECOMPILED_WHEEL_LOCATION
 # envsetup.sh repoints pip at an internal mirror (art.eng.t-head.cn) that is
-# unreachable from the CPU runner; force the public Aliyun PyPI mirror after the
+# unreachable from the CI build environment; force the public Aliyun PyPI mirror after the
 # SDK env is sourced. Override with SAIL_PIP_INDEX_URL.
 export PIP_INDEX_URL="${SAIL_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
 export PIP_EXTRA_INDEX_URL=""

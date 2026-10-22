@@ -74,7 +74,7 @@ def test_build_script_caps_parallelism_to_avoid_oom() -> None:
     assert 'BUILD_JOBS="${BUILD_JOBS:-' in text
 
 
-def test_build_workflow_is_call_only_on_cpu_runner() -> None:
+def test_build_workflow_is_call_only_on_community_runner() -> None:
     import yaml
 
     text = WORKFLOW.read_text()
@@ -82,10 +82,9 @@ def test_build_workflow_is_call_only_on_cpu_runner() -> None:
     assert "workflow_dispatch:" not in text
     assert "pull_request:" not in text
     assert "push:" not in text
-    # ppu-scheduler-action does not support compiling on PPU resources; t-head
-    # build jobs must run on the CPU runner scale set. The pod is sized with
-    # enough memory for the memory-aware parallelism cap to compile in parallel.
-    assert "runs-on: k8s-runner-group-cpu-thead" in text
+    # Wheel builds run directly in a pinned container on the community runner;
+    # they must not dispatch compilation through ppu-scheduler-action.
+    assert "runs-on: 8-ppu-m890p" in text
     assert "ppu-scheduler-action" not in text
     assert "contents: read" in text
 

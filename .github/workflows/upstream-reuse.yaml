@@ -118,7 +118,7 @@ jobs:
   resolve-build:
     name: Resolve nightly wheel build
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: k8s-runner-group-cpu-thead
+    runs-on: 8-ppu-m890p
     timeout-minutes: 10
     container:
       image: ${{ inputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952' }}
@@ -159,7 +159,7 @@ jobs:
     name: Category-5 upstream reuse (${{ matrix.chip }})
     needs: resolve-build
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: k8s-runner-group-cpu-thead
+    runs-on: 8-ppu-m890p
     timeout-minutes: 90
     container:
       image: ${{ inputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952' }}
