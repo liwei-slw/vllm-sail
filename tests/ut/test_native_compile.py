@@ -651,6 +651,8 @@ def test_ppu_compat_masks_the_nvidia_scalar_headers(tmp_path: Path) -> None:
     unit = tmp_path / "scalars.cpp"
     unit.write_text(
         '#include "ppu_compat.h"\n'
+        "#include <cuda_fp16.h>\n"
+        "#include <cuda_bf16.h>\n"
         "#ifndef __CUDA_FP16_H__\n"
         "#error NVIDIA cuda_fp16.h would redefine the native half types\n"
         "#endif\n"
