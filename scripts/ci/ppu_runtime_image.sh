@@ -5,15 +5,15 @@ set -Eeuo pipefail
 
 override=${1:-}
 configured=${PPU_CI_RUNTIME_IMAGE:-}
-known_image_id=sha256:8e4b3adfef4f6051cd30516144ed32c25b700f96f861b43e233447b1c90ceb89
-legacy_runtime=reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb
+known_image_id=sha256:55454f6df5e6a63f3d53741962615225cac4b562505f1584c0166eaf2bacb168
+known_runtime=pkg.flytiger-eco.com/docker_release/llm@sha256:889a6504ad16ec5766c5f7bccceb2881276899dbb4e2ab965f312a47e8cefac8
 
 if [[ -n "${override}" ]]; then
     candidates=("${override}")
 elif [[ -n "${configured}" ]]; then
     candidates=("${configured}")
 else
-    candidates=("${known_image_id}" "${legacy_runtime}")
+    candidates=("${known_image_id}" "${known_runtime}")
 fi
 
 for candidate in "${candidates[@]}"; do
