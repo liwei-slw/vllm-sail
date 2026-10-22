@@ -83,7 +83,7 @@ jobs:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha || '' }}
-      image: ${{ needs.build.outputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb' }}
+      image: ${{ needs.build.outputs.image || 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80' }}
 
   model-tests:
     name: PPU model tests
@@ -106,7 +106,7 @@ jobs:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha || '' }}
-      image: ${{ needs.build.outputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb' }}
+      image: ${{ needs.build.outputs.image || 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80' }}
 
   gate:
     name: PPU CI gate

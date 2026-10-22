@@ -209,7 +209,7 @@ def test_image_build_only_replaces_torch_before_capturing_the_stack():
 def test_all_ci_paths_use_the_same_pinned_image_stack():
     import yaml
 
-    image = "reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb"
+    image = "download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80"
     workflow = yaml.safe_load(WORKFLOW.read_text())
     inputs = yaml.safe_load((WORKFLOW.parent / "ppu-ops-tests.yaml").read_text())[True][
         "workflow_dispatch"

@@ -38,7 +38,7 @@ on:
       image:
         description: Runtime container image the PPU pod runs
         required: false
-        default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952
+        default: download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80
         type: string
   schedule:
     # 18:30 UTC = 02:30 CST, after the E2E nightly (18:00 UTC).
@@ -121,7 +121,7 @@ jobs:
     runs-on: 8-ppu-m890p
     timeout-minutes: 10
     container:
-      image: ${{ inputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952' }}
+      image: ${{ inputs.image || 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80' }}
     outputs:
       build_run_id: ${{ steps.resolve.outputs.build_run_id }}
     steps:
@@ -162,7 +162,7 @@ jobs:
     runs-on: 8-ppu-m890p
     timeout-minutes: 90
     container:
-      image: ${{ inputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952' }}
+      image: ${{ inputs.image || 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80' }}
     strategy:
       fail-fast: false
       matrix:
@@ -218,7 +218,7 @@ jobs:
       - name: Run full upstream reuse set on PPU (${{ matrix.chip }})
         uses: t-head/ppu-scheduler-action@main
         with:
-          image: ${{ inputs.image || 'reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202609111952' }}
+          image: ${{ inputs.image || 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80' }}
           nnodes: 0
           nproc_per_node: ${{ matrix.nproc }}
           namespace: ppu-sched

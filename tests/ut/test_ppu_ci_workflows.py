@@ -20,8 +20,8 @@ DEFAULT_REF_GUARD = (
     "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
 )
 DEFAULT_IMAGE = (
-    "reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:"
-    "24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb"
+    "download.t-head.cn/docker_release/pytorch@sha256:"
+    "a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80"
 )
 
 

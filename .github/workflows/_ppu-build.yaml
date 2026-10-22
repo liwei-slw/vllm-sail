@@ -37,9 +37,9 @@ jobs:
     outputs:
       image: ${{ steps.image.outputs.image }}
     container:
-      image: ${{ inputs.build_image || 'reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb' }}
+      image: ${{ inputs.build_image || 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80' }}
     env:
-      VLLM_SAIL_BUILD_IMAGE: ${{ inputs.build_image || 'reg.docker.alibaba-inc.com/ai-tmp/llm@sha256:24872709b1a84ec0e91260eeeccf6ae7ba52a6c70fb90f55a7aae1c1df503bcb' }}
+      VLLM_SAIL_BUILD_IMAGE: ${{ inputs.build_image || 'download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80' }}
       VLLM_REF: ${{ inputs.vllm_ref }}
       PYTORCH_SAIL_ARCH: ${{ inputs.pytorch_sail_arch || 'ppu_15;ppu_10' }}
       ARTIFACT_DIR: ${{ github.workspace }}/artifacts
