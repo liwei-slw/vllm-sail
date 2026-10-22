@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Compile regressions using host tools, without torch, vLLM, or a PPU SDK.
 
-These exercise CMake's option handling and the sampler's scalar load block.
+These exercise CMake options, compatibility headers and sampler scalar loads.
 They do not compile device code or establish PPU numerical correctness.
 """
 
@@ -48,6 +48,153 @@ def _write_native_sdk_stubs(sdk: Path) -> None:
         "hggc_runtime_api.hpp": "#pragma once\n",
     }.items():
         (sdk / header).write_text(body, encoding="utf-8")
+
+
+@pytest.mark.parametrize("cuda_checks_available", [True, False])
+def test_stable_abi_macros_preserve_torch_error_checking(
+    tmp_path: Path, cuda_checks_available: bool
+) -> None:
+    """Compile the real wrapper over a torch-free header and exercise its API.
+
+    Include order must reach the wrapper and then the original header. Older
+    torch headers without CUDA checks must retain that feature boundary.
+    """
+    compiler = _tool("c++")
+    torch_include = tmp_path / "torch_include"
+    header = torch_include / "torch/csrc/stable/macros.h"
+    header.parent.mkdir(parents=True)
+    header.write_text(
+        r"""
+#pragma once
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#define TORCH_STABLE_HEADER_SEEN 1
+#define STABLE_TORCH_ERROR_CODE_CHECK(EXPR) (EXPR)
+#if TEST_CUDA_CHECKS_AVAILABLE
+// Fail if either original macro survives instead of the PPU adaptation.
+#define STD_CUDA_CHECK(EXPR) static_assert(false, "unadapted CUDA check")
+#define STD_CUDA_KERNEL_LAUNCH_CHECK() static_assert(false, "unadapted launch check")
+#endif
+""",
+        encoding="utf-8",
+    )
+    unit = tmp_path / "stable_macros.cpp"
+    unit.write_text(
+        r"""
+#include <cassert>
+#include <cstring>
+#include <torch/csrc/stable/macros.h>
+static_assert(TORCH_STABLE_HEADER_SEEN == 1);
+static_assert(STABLE_TORCH_ERROR_CODE_CHECK(42) == 42);
+
+#if TEST_CUDA_CHECKS_AVAILABLE
+enum cudaError_t { cudaSuccess = 0, cudaFailure = 7 };
+enum hggcError_t { hggcSuccess = 0, hggcFailure = 8 };
+int evaluations = 0, checks = 0, frees = 0, launches = 0;
+int last_error = 0;
+uint32_t expected_line = 0;
+const char* expected_function = nullptr;
+char* allocated_message = nullptr;
+constexpr char error_message[] = "mock runtime error";
+hggcError_t launch_error = hggcSuccess;
+
+void torch_c10_cuda_check_msg(int32_t error, const char* file,
+                            const char* function, uint32_t line,
+                            bool device_assertions, char** message) {
+  assert(std::strcmp(file, __FILE__) == 0);
+  assert(std::strcmp(function, expected_function) == 0);
+  assert(line == expected_line && device_assertions);
+  assert(*message == nullptr && allocated_message == nullptr);
+  ++checks;
+  last_error = error;
+  if (error != 0) {
+    allocated_message = new char[sizeof(error_message)];
+    std::memcpy(allocated_message, error_message, sizeof(error_message));
+    *message = allocated_message;
+  }
+}
+void torch_c10_cuda_free_error_msg(char* message) {
+  assert(message != nullptr && message == allocated_message);
+  ++frees;
+  delete[] message;
+  allocated_message = nullptr;
+}
+hggcError_t hggcGetLastError() {
+  ++launches;
+  return launch_error;
+}
+template <typename Error> Error evaluate(Error error) {
+  ++evaluations;
+  return error;
+}
+template <typename Error> void check(Error success, Error failure) {
+  expected_function = __func__;
+  const int previous_checks = checks, previous_frees = frees;
+  const int previous_evaluations = evaluations;
+  expected_line = __LINE__ + 1;
+  if (true) STD_CUDA_CHECK(evaluate(success)); else assert(false);
+  assert(checks == previous_checks + 1 && frees == previous_frees);
+  assert(last_error == 0 && allocated_message == nullptr);
+  assert(evaluations == previous_evaluations + 1);
+  try {
+    expected_line = __LINE__ + 1;
+    STD_CUDA_CHECK(evaluate(failure));
+    assert(false && "error must propagate");
+  } catch (const std::runtime_error& error) {
+    assert(std::string(error.what()) == error_message);
+    assert(frees == previous_frees + 1 && allocated_message == nullptr);
+  }
+  assert(last_error == static_cast<int32_t>(failure));
+  assert(checks == previous_checks + 2);
+  assert(evaluations == previous_evaluations + 2);
+}
+int main() {
+  check(cudaSuccess, cudaFailure);
+  check(hggcSuccess, hggcFailure);
+  expected_function = __func__;
+  expected_line = __LINE__ + 1;
+  STD_CUDA_KERNEL_LAUNCH_CHECK();
+  assert(launches == 1 && checks == 5 && frees == 2 && last_error == 0);
+  launch_error = hggcFailure;
+  try {
+    expected_line = __LINE__ + 1;
+    STD_CUDA_KERNEL_LAUNCH_CHECK();
+    assert(false && "launch error must propagate");
+  } catch (const std::runtime_error& error) {
+    assert(std::string(error.what()) == error_message);
+    assert(frees == 3 && allocated_message == nullptr);
+  }
+  assert(launches == 2 && checks == 6 && last_error == 8);
+}
+#else
+#ifdef STD_CUDA_CHECK
+#error CUDA checks must remain unavailable when torch does not define them
+#endif
+#ifdef STD_CUDA_KERNEL_LAUNCH_CHECK
+#error CUDA launch checks must remain unavailable when torch does not define them
+#endif
+int main() {}
+#endif
+""",
+        encoding="utf-8",
+    )
+    executable = tmp_path / "stable_macros"
+    _run(
+        [
+            compiler,
+            "-std=c++17",
+            f"-DTEST_CUDA_CHECKS_AVAILABLE={int(cuda_checks_available)}",
+            "-I",
+            str(ROOT / "csrc"),
+            "-I",
+            str(torch_include),
+            str(unit),
+            "-o",
+            str(executable),
+        ]
+    )
+    _run([str(executable)])
 
 
 def test_gdn_native_binding_guards_are_enabled_by_the_build(tmp_path):
