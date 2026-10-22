@@ -187,7 +187,7 @@ def test_rust_build_is_explicit_before_wheel_packaging() -> None:
     assert "vllm-rust-build.log" in text
 
 
-def test_image_build_only_replaces_torch_before_capturing_the_stack():
+def test_image_build_captures_the_pinned_image_stack_before_building():
     text = SCRIPT.read_text()
     for forbidden in (
         "SDK_URL",
@@ -199,10 +199,10 @@ def test_image_build_only_replaces_torch_before_capturing_the_stack():
         "download()",
     ):
         assert forbidden not in text
-    prepare = text.index('ppu_image_stack.py" prepare')
+    capture = text.index('ppu_image_stack.py" capture')
     verify = text.index('ppu_image_stack.py" verify')
-    assert prepare < text.index("compatible_wrapper.h")
-    assert prepare < text.index("python -m pip install") < verify
+    assert capture < text.index("compatible_wrapper.h")
+    assert capture < text.index("python -m pip install") < verify
     assert verify < text.index("status=succeeded")
 
 
@@ -350,6 +350,8 @@ def test_image_stack_cli_capture_verify_and_refuse_mutation(tmp_path):
     site = tmp_path / "site"
     torch = site / "torch"
     torch.mkdir(parents=True)
+    (torch / ".ppu_compat").mkdir()
+    (torch / ".ppu_compat/compatible_wrapper.h").write_text("header")
     (torch / "__init__.py").write_text('__version__ = "2.13.0"\n')
     dist = site / "torch-2.13.0.dist-info"
     dist.mkdir()
@@ -688,10 +690,10 @@ def test_prepare_records_replacement_provenance_and_checks_header(
 
 
 @pytest.mark.parametrize("script", ["ppu_pin_ut.sh", "ppu_e2e_smoke.sh"])
-def test_runtime_scripts_prepare_same_torch_before_installing_wheels(script):
+def test_runtime_scripts_capture_same_image_stack_before_installing_wheels(script):
     text = (ROOT / "scripts/ci" / script).read_text()
-    prepare = text.index('ppu_image_stack.py" prepare')
+    capture = text.index('ppu_image_stack.py" capture')
     install = text.index("python -m pip install")
     verify = text.index('ppu_image_stack.py" verify')
-    assert prepare < install < verify
-    assert "--constraints" in text[prepare:install]
+    assert capture < install < verify
+    assert "--constraints" in text[capture:install]

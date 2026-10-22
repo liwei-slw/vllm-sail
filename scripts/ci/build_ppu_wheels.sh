@@ -98,7 +98,7 @@ export PIP_CONSTRAINT="${WORK_DIR}/image-constraints.txt"
 
 command -v hgcc
 "${HGCC}" --version 2>&1 | tee "${LOG_DIR}/hgcc-version.log"
-python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" prepare \
+python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
     --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" \
     --constraints "${PIP_CONSTRAINT}" | tee -a "${MANIFEST}"
 python - <<'PY' 2>&1 | tee "${LOG_DIR}/torch-env.log"

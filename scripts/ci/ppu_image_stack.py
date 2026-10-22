@@ -218,13 +218,9 @@ def main():
 
     import torch
 
-    if (
-        replaced
-        and not (
-            Path(torch.__file__).parent / ".ppu_compat/compatible_wrapper.h"
-        ).is_file()
-    ):
-        raise ValueError("prepared Torch is missing .ppu_compat/compatible_wrapper.h")
+    if not (Path(torch.__file__).parent / ".ppu_compat/compatible_wrapper.h").is_file():
+        source = "prepared" if replaced else "image-provided"
+        raise ValueError(f"{source} Torch is missing .ppu_compat/compatible_wrapper.h")
     observed = snapshot(
         args.sdk,
         Path(torch.__file__).parent,

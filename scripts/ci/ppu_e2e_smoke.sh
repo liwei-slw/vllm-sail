@@ -60,7 +60,7 @@ mapfile -t sail_wheels < <(
 echo "vllm wheel: ${vllm_wheels[0]}"
 echo "sail wheel: ${sail_wheels[0]}"
 export PIP_CONSTRAINT="/tmp/ppu-smoke-image-constraints.txt"
-python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" prepare \
+python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
     --sdk /usr/local/PPU_SDK --output /tmp/ppu-smoke-image-stack.json \
     --constraints "${PIP_CONSTRAINT}"
 python -m pip install --no-deps --force-reinstall "${vllm_wheels[0]}"
