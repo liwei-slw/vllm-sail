@@ -31,9 +31,9 @@ on:
         type: string
         default: ""
       runtime_image:
-        description: CUDA-compatible runtime image preloaded on the PPU runner
+        description: CUDA-compatible runtime image override (blank uses runner PPU_CI_RUNTIME_IMAGE)
         type: string
-        default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202610070948
+        default: ""
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
@@ -87,7 +87,7 @@ jobs:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha || '' }}
-      image: ${{ inputs.runtime_image || 'reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202610070948' }}
+      image: ${{ inputs.runtime_image || '' }}
 
   model-tests:
     name: PPU model tests
@@ -110,7 +110,7 @@ jobs:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha || '' }}
-      image: ${{ inputs.runtime_image || 'reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202610070948' }}
+      image: ${{ inputs.runtime_image || '' }}
 
   gate:
     name: PPU CI gate

@@ -361,7 +361,7 @@ def test_pr_pipeline_structure():
             "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
             "wheel_source_sha": "${{ inputs.wheel_source_sha || '' }}",
             "build_run_id": "${{ inputs.existing_build_run_id || github.run_id }}",
-            "image": "${{ inputs.runtime_image || '" + RUNTIME_IMAGE + "' }}",
+            "image": "${{ inputs.runtime_image || '' }}",
         }
 
 
@@ -438,8 +438,8 @@ def test_debug_structure():
     assert inputs["models"]["type"] == "string"
     assert inputs["models"]["default"] == "qwen3.8-27b-m890p"
     assert inputs["image"]["type"] == "string"
-    assert inputs["image"]["required"] is True
-    assert inputs["image"]["default"] == RUNTIME_IMAGE
+    assert inputs["image"]["required"] is False
+    assert inputs["image"]["default"] == ""
     assert "concurrency" not in config
     jobs = config["jobs"]
     assert set(jobs) == {"pin-unit-tests", "model-tests"}

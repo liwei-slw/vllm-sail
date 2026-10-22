@@ -7,8 +7,9 @@ SCRIPT = ROOT / "scripts/ci/ppu_runtime_container.sh"
 
 def test_runtime_wrapper_uses_preloaded_image_and_explicit_ppu_devices():
     text = SCRIPT.read_text()
-    assert 'docker image inspect "${PPU_RUNTIME_IMAGE}"' in text
-    assert 'docker pull "${PPU_RUNTIME_IMAGE}"' in text
+    assert 'runtime_image="${PPU_RUNTIME_IMAGE:-${PPU_CI_RUNTIME_IMAGE:-}}"' in text
+    assert 'docker image inspect "${runtime_image}"' in text
+    assert 'docker pull "${runtime_image}"' in text
     assert "--device=/dev/alixpu" in text
     assert "--device=/dev/alixpu_ctl" in text
     assert "--device=/dev/alixpu_sep" in text

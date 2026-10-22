@@ -235,19 +235,16 @@ def test_ci_uses_separate_pinned_build_and_runtime_stacks():
     assert build_image in build["container"]["image"]
     assert build["env"]["VLLM_SAIL_BUILD_IMAGE"] == build["container"]["image"]
     pipeline = yaml.safe_load((WORKFLOW.parent / "ppu-build-and-test.yaml").read_text())
-    assert (
-        pipeline[True]["workflow_call"]["inputs"]["runtime_image"]["default"]
-        == runtime_image
-    )
+    assert pipeline[True]["workflow_call"]["inputs"]["runtime_image"]["default"] == ""
     for job in ("pin-unit-tests", "model-tests"):
         assert (
             pipeline["jobs"][job]["with"]["image"]
-            == "${{ inputs.runtime_image || '" + runtime_image + "' }}"
+            == "${{ inputs.runtime_image || '' }}"
         )
     for name in ("_ppu-pin-ut.yaml", "_ppu-model-tests.yaml", "ppu-debug.yaml"):
         triggers = yaml.safe_load((WORKFLOW.parent / name).read_text())[True]
         for trigger in triggers.values():
-            assert trigger["inputs"]["image"]["default"] == runtime_image
+            assert trigger["inputs"]["image"]["default"] == ""
 
 
 @pytest.fixture
