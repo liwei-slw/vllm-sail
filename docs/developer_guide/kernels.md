@@ -70,8 +70,8 @@ only after regeneration, compilation and device correctness checks pass.
 An empty plugin architecture setting uses `PYTORCH_SAIL_ARCH` or the default
 list. An empty standard uses `20`, and empty flags add no options.
 
-Native extensions are enabled by default. The build gate checks for SAIL
-PyTorch's compatibility header, `hgcc` and CMake, and fails with the first
+Native extensions are enabled by default. The build gate checks that PyTorch
+is importable and that `hgcc` and CMake are available, and fails with the first
 missing prerequisite. Only `VLLM_SAIL_SKIP_EXT=1` produces a Python-only
 package. Run the preflight in the installation guide before building a package
 for inference.
