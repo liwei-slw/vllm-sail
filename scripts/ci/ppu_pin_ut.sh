@@ -13,11 +13,11 @@ unset VLLM_VERSION PYTHONPATH
 export VLLM_USE_RUST_FRONTEND=0 VLLM_USE_RUST_BENCH=0
 python "${ROOT_DIR}/scripts/ci/ppu_wheel_manifest.py" verify "${WHEELS_DIR}"
 
-# The scheduler stages artifacts with the source. Move them outside the checkout
-# so packaging UT does not copy the large wheels into its temporary source trees.
+# Copy the read-only wheel mount outside the checkout so packaging UT does not
+# copy the large wheels into its temporary source trees.
 WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "${WORK_DIR}"' EXIT
-mv "${WHEELS_DIR}" "${WORK_DIR}/wheels"
+cp -a "${WHEELS_DIR}" "${WORK_DIR}/wheels"
 WHEELS_DIR="${WORK_DIR}/wheels"
 export PIP_CONSTRAINT="${UT_RESULTS_DIR}/image-constraints.txt"
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \

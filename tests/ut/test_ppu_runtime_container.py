@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[2]
+SCRIPT = ROOT / "scripts/ci/ppu_runtime_container.sh"
+
+
+def test_runtime_wrapper_uses_preloaded_image_and_explicit_ppu_devices():
+    text = SCRIPT.read_text()
+    assert 'docker image inspect "${PPU_RUNTIME_IMAGE}"' in text
+    assert 'docker pull "${PPU_RUNTIME_IMAGE}"' in text
+    assert "--device=/dev/alixpu" in text
+    assert "--device=/dev/alixpu_ctl" in text
+    assert "--device=/dev/alixpu_sep" in text
+    assert "/dev/alixpu_ppu${index}" in text
+    assert "--env NVIDIA_VISIBLE_DEVICES=void" in text
+    assert '--env CUDA_VISIBLE_DEVICES="${visible_csv}"' in text
+    assert "--env PYTHONPYCACHEPREFIX=/tmp/pycache" in text
+    assert "--privileged" not in text
+
+
+def test_runtime_wrapper_mounts_inputs_read_only_and_artifacts_writable():
+    text = SCRIPT.read_text()
+    assert "target=/source,readonly" in text
+    assert "target=/wheels,readonly" in text
+    assert "target=/nas_aisw,readonly" in text
+    assert 'target=/artifacts"' in text
+    assert "/source/scripts/ci/ppu_pin_ut.sh" in text
+    assert "/source/scripts/ci/ppu_e2e_smoke.sh" in text
+
+
+def test_runtime_wrapper_serializes_jobs_and_verifies_source_identity():
+    text = SCRIPT.read_text()
+    assert "flock -n 9" in text
+    assert "rev-parse HEAD" in text
+    assert "PPU_CI_SOURCE_SHA" in text
+    assert "docker stop --time=2" in text
+    assert "docker rm --force" in text

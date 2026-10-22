@@ -18,9 +18,9 @@ on:
         required: true
         type: string
       image:
-        description: SAIL runtime image, as used by the E2E smoke
+        description: CUDA-compatible runtime image preloaded on the PPU runner
         type: string
-        default: download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80
+        default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202610070948
 
 permissions:
   contents: read
@@ -31,36 +31,25 @@ jobs:
   pin-unit-tests:
     name: main-verified
     runs-on: 8-ppu-m890p
-    timeout-minutes: 30
-    container:
-      image: ${{ inputs.image }}
+    timeout-minutes: 45
     env:
-      WHEELS_DIR: /tmp/ppu-wheels
-      VLLM_USE_RUST_FRONTEND: "0"
-      VLLM_USE_RUST_BENCH: "0"
+      GIT_CONFIG_NOSYSTEM: "1"
     defaults:
       run:
         shell: bash
     steps:
-      - name: Disable internal GitHub mirror rewrite
-        shell: bash
+      - name: Prepare private runtime directories and Git configuration
+        id: runtime
         run: |
-          # The job container image ships a global/system git
-          # url.<internal-mirror>.insteadOf = https://github.com rewrite. Left in
-          # place it makes actions/checkout fetch from the internal mirror and
-          # fail, so strip only the github.com rewrites before checkout.
-          for scope in system global; do
-            echo "=== ${scope} insteadOf before ==="
-            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
-            while IFS= read -r section; do
-              [ -n "${section}" ] || continue
-              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
-            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
-          done
-          echo "=== insteadOf after (system) ==="
-          git config --system --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
-          echo "=== insteadOf after (global) ==="
-          git config --global --get-regexp '^url\..*\.insteadof$' 2>/dev/null || echo none
+          config="$(mktemp "${RUNNER_TEMP}/git-config.XXXXXX")"
+          wheels="$(mktemp -d "${RUNNER_TEMP}/ppu-pin-wheels.XXXXXX")"
+          artifacts="$(mktemp -d "${RUNNER_TEMP}/ppu-pin-artifacts.XXXXXX")"
+          {
+            printf 'GIT_CONFIG_GLOBAL=%s\n' "$config"
+            printf 'wheels=%s\n' "$wheels"
+            printf 'artifacts=%s\n' "$artifacts"
+          } >> "$GITHUB_OUTPUT"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
 
       - name: Require disabled cache access
         uses: actions/github-script@v7
@@ -69,12 +58,14 @@ jobs:
             if (process.env.ACTIONS_CACHE_MODE !== 'none') {
               core.setFailed('PPU CI requires cache-mode: none');
             }
+
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
         with:
           github-server-url: https://github.com
           ref: ${{ inputs.pr_head_sha || github.sha }}
           persist-credentials: false
+
       - name: Verify checked-out revision
         env:
           EXPECTED_SHA: ${{ inputs.pr_head_sha || github.sha }}
@@ -84,7 +75,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ppu-wheels-${{ inputs.build_run_id }}
-          path: ${{ env.WHEELS_DIR }}
+          path: ${{ steps.runtime.outputs.wheels }}
           run-id: ${{ inputs.build_run_id }}
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
@@ -92,11 +83,12 @@ jobs:
       - name: Verify wheel manifest and pin
         id: manifest
         env:
+          WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}
           REQUIRE_PR_ARTIFACT: ${{ inputs.pr_mode }}
           WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
         run: |
-          python scripts/ci/ppu_wheel_manifest.py verify "${WHEELS_DIR}"
-          python - <<'PYTHON'
+          python3 scripts/ci/ppu_wheel_manifest.py verify "${WHEELS_DIR}"
+          python3 - <<'PYTHON'
           import json
           import os
           import re
@@ -110,8 +102,7 @@ jobs:
           actual = manifest["commits"]["vllm"]
           matches = actual == expected
           if os.environ["REQUIRE_PR_ARTIFACT"] == "true":
-              # PR gating must fail closed; a manual reuse may skip a different pin.
-              cmd = ["python", "scripts/ci/ppu_wheel_manifest.py", "verify", os.environ["WHEELS_DIR"],
+              cmd = ["python3", "scripts/ci/ppu_wheel_manifest.py", "verify", os.environ["WHEELS_DIR"],
                      "--vllm-commit", expected, "--sail-commit", os.environ["WHEEL_SOURCE_SHA"]]
               subprocess.run(cmd, check=True)
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
@@ -124,31 +115,16 @@ jobs:
               output.write(summary + "\n")
           PYTHON
 
-      - name: Run pin UT in a fresh single-card PPU container
+      - name: Run pin UT in the preloaded CUDA-compatible runtime
         if: steps.manifest.outputs.matches == 'true'
-        uses: t-head/ppu-scheduler-action@main
-        with:
-          image: ${{ inputs.image }}
-          nnodes: 0
-          nproc_per_node: 1
-          namespace: ppu-sched
-          node_selector: board-type=OAM-810E
-          timeout_minutes: 20
-          cleanup_policy: always
-          job_suffix: pin-main-verified
-          source_dir: /workspace/source
-          artifact_paths: ${{ env.WHEELS_DIR }}
-          extra_env: WHEELS_DIR=/workspace/source/ppu-wheels,UT_RESULTS_DIR=/mnt/wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-main-verified,VLLM_USE_RUST_FRONTEND=0,VLLM_USE_RUST_BENCH=0
-          container_options: |
-            privileged: true
-            host_ipc: true
-            host_network: true
-            shm_size: 8Gi
-          # Privileged pods see every card; bind the assigned ones before Python starts.
-          command: >-
-            cd /workspace/source &&
-            export CUDA_VISIBLE_DEVICES="${NVIDIA_VISIBLE_DEVICES:?Assigned devices are unavailable}" &&
-            bash scripts/ci/ppu_pin_ut.sh
+        env:
+          PPU_RUNTIME_IMAGE: ${{ inputs.image }}
+          PPU_CI_SOURCE_DIR: ${{ github.workspace }}
+          PPU_CI_SOURCE_SHA: ${{ inputs.pr_head_sha || github.sha }}
+          PPU_CI_WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}
+          PPU_CI_ARTIFACT_DIR: ${{ steps.runtime.outputs.artifacts }}
+          PPU_CI_DEVICE_COUNT: "1"
+        run: bash scripts/ci/ppu_runtime_container.sh pin-ut
 
       - name: Upload pin UT diagnostics
         if: always()
@@ -156,8 +132,7 @@ jobs:
         with:
           name: ppu-pin-main-verified-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-main-verified/*.log
-            /wl_nas/devops/${{ github.run_id }}-${{ github.run_attempt }}/pin-ut-main-verified/pin-ut.xml
-            ${{ env.WHEELS_DIR }}/wheel-manifest.json
+            ${{ steps.runtime.outputs.artifacts }}/**
+            ${{ steps.runtime.outputs.wheels }}/wheel-manifest.json
           if-no-files-found: warn
           retention-days: 14

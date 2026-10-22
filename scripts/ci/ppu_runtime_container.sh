@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Run pin/model validation in an isolated CUDA-compatible PPU runtime container.
+set -Eeuo pipefail
+
+mode=${1:?Usage: ppu_runtime_container.sh pin-ut|model-test}
+case "${mode}" in
+    pin-ut|model-test) ;;
+    *) printf 'Unknown runtime mode: %s\n' "${mode}" >&2; exit 2 ;;
+esac
+
+: "${PPU_RUNTIME_IMAGE:?PPU_RUNTIME_IMAGE is required}"
+: "${PPU_CI_SOURCE_DIR:?PPU_CI_SOURCE_DIR is required}"
+: "${PPU_CI_SOURCE_SHA:?PPU_CI_SOURCE_SHA is required}"
+: "${PPU_CI_WHEELS_DIR:?PPU_CI_WHEELS_DIR is required}"
+: "${PPU_CI_ARTIFACT_DIR:?PPU_CI_ARTIFACT_DIR is required}"
+: "${PPU_CI_DEVICE_COUNT:?PPU_CI_DEVICE_COUNT is required}"
+
+source_dir=$(realpath "${PPU_CI_SOURCE_DIR}")
+wheels_dir=$(realpath "${PPU_CI_WHEELS_DIR}")
+mkdir -p "${PPU_CI_ARTIFACT_DIR}"
+artifact_dir=$(realpath "${PPU_CI_ARTIFACT_DIR}")
+git -C "${source_dir}" rev-parse --is-inside-work-tree >/dev/null
+[[ "$(git -C "${source_dir}" rev-parse HEAD)" == "${PPU_CI_SOURCE_SHA}" ]] || {
+    echo "PPU CI source checkout does not match PPU_CI_SOURCE_SHA" >&2
+    exit 2
+}
+[[ -d "${wheels_dir}" ]] || { echo "PPU CI wheel directory is missing" >&2; exit 2; }
+[[ "${PPU_CI_DEVICE_COUNT}" =~ ^[1-8]$ ]] || {
+    echo "PPU_CI_DEVICE_COUNT must be between 1 and 8" >&2
+    exit 2
+}
+
+exec 9>/tmp/vllm-sail-ppu-ci.lock
+flock -n 9 || { echo "Another vLLM SAIL PPU job is active on this runner" >&2; exit 2; }
+
+uid=$(id -u)
+gid=$(id -g)
+prefix="vllm-sail-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}-${mode}"
+container=""
+image_id=""
+cleanup() {
+    code=$?
+    trap - EXIT
+    set +e
+    if [[ -n "${container}" ]]; then
+        docker stop --time=2 "${container}" 9>&- >/dev/null 2>&1 || true
+        docker rm --force "${container}" 9>&- >/dev/null 2>&1 || true
+    fi
+    if [[ -n "${image_id}" ]]; then
+        docker run --rm --runtime=runc --network=none \
+            --env NVIDIA_VISIBLE_DEVICES=void --user 0:0 \
+            --mount "type=bind,source=${artifact_dir},target=/artifacts" \
+            --entrypoint chown "${image_id}" -hR -- "${uid}:${gid}" /artifacts \
+            9>&- >/dev/null 2>&1 || true
+    fi
+    exec 9>&-
+    exit "${code}"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! image_id=$(docker image inspect "${PPU_RUNTIME_IMAGE}" --format '{{.Id}}' 9>&- 2>/dev/null); then
+    printf 'Runtime image is not preloaded; pulling %s\n' "${PPU_RUNTIME_IMAGE}" >&2
+    docker pull "${PPU_RUNTIME_IMAGE}" 9>&-
+    image_id=$(docker image inspect "${PPU_RUNTIME_IMAGE}" --format '{{.Id}}' 9>&-)
+fi
+[[ "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+    echo "Docker did not resolve an immutable runtime image ID" >&2
+    exit 2
+}
+printf '%s\n' "${PPU_RUNTIME_IMAGE}" >"${artifact_dir}/runtime-image.txt"
+printf '%s\n' "${image_id}" >"${artifact_dir}/runtime-image-id.txt"
+
+container="${prefix}"
+device_args=(
+    --device=/dev/alixpu
+    --device=/dev/alixpu_ctl
+    --device=/dev/alixpu_sep
+)
+visible=()
+for ((index = 0; index < PPU_CI_DEVICE_COUNT; index++)); do
+    device_args+=(--device="/dev/alixpu_ppu${index}")
+    visible+=("${index}")
+done
+visible_csv=$(IFS=,; echo "${visible[*]}")
+
+create=(
+    docker create --name "${container}" --runtime=runc
+    --ipc=host --network=host
+    --mount "type=bind,source=${source_dir},target=/source,readonly"
+    --mount "type=bind,source=${wheels_dir},target=/wheels,readonly"
+    --mount "type=bind,source=${artifact_dir},target=/artifacts"
+    --env NVIDIA_VISIBLE_DEVICES=void
+    --env CUDA_VISIBLE_DEVICES="${visible_csv}"
+    --env PYTHONPYCACHEPREFIX=/tmp/pycache
+    --env WHEELS_DIR=/wheels
+)
+create+=("${device_args[@]}")
+
+if [[ "${mode}" == pin-ut ]]; then
+    create+=(
+        --shm-size=8g
+        --env UT_RESULTS_DIR=/artifacts
+        --env VLLM_USE_RUST_FRONTEND=0
+        --env VLLM_USE_RUST_BENCH=0
+        --entrypoint bash "${image_id}"
+        /source/scripts/ci/ppu_pin_ut.sh
+    )
+else
+    : "${MODEL_PATH:?MODEL_PATH is required for model-test}"
+    : "${SERVED_NAME:?SERVED_NAME is required for model-test}"
+    : "${TP_SIZE:?TP_SIZE is required for model-test}"
+    [[ "${MODEL_PATH}" == /nas_aisw/* ]] || {
+        echo "MODEL_PATH must be under /nas_aisw" >&2
+        exit 2
+    }
+    create+=(
+        --shm-size=32g
+        --mount "type=bind,source=/nas_aisw,target=/nas_aisw,readonly"
+        --env MODEL_PATH="${MODEL_PATH}"
+        --env SERVED_NAME="${SERVED_NAME}"
+        --env TP_SIZE="${TP_SIZE}"
+        --env EXTRA_SERVE_FLAGS="${EXTRA_SERVE_FLAGS:-}"
+        --env VLLM_USE_RUST_FRONTEND=0
+        --env VLLM_USE_RUST_BENCH=0
+        --entrypoint bash "${image_id}"
+        /source/scripts/ci/ppu_e2e_smoke.sh
+    )
+fi
+
+"${create[@]}" 9>&- >"${artifact_dir}/container-id.txt"
+docker start --attach "${container}" 9>&- 2>&1 | tee "${artifact_dir}/runtime.log"

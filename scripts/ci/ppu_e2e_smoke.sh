@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 #
-# PPU end-to-end smoke test, executed inside the PPU pod dispatched by
-# t-head/ppu-scheduler-action. It installs the CI-built vLLM and vLLM SAIL
-# wheels, self-checks the SAIL platform, serves a model from the auto-mounted
-# NAS checkpoint, and verifies one chat completion request end to end.
+# PPU end-to-end smoke test, executed inside the CUDA-compatible runtime
+# container created on a self-hosted PPU runner. It installs the CI-built vLLM
+# and vLLM SAIL wheels, self-checks the SAIL platform, serves a model from the
+# read-only NAS checkpoint mount, and verifies one chat completion end to end.
 #
-# Environment contract (injected via the action's extra_env):
+# Environment contract (injected by ppu_runtime_container.sh):
 #   MODEL_PATH          absolute checkpoint path (under the auto-mounted NAS)
 #   SERVED_NAME         served-model-name exposed by vLLM
 #   TP_SIZE             tensor-parallel size (matches the pod's PPU card count)

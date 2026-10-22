@@ -22,15 +22,14 @@ on:
       models:
         description: Comma-separated model catalog keys
         type: string
-        default: qwen3.8-27b,qwen3.8-27b-m890p
+        default: qwen3.8-27b-m890p
       image:
-        description: SAIL runtime image
+        description: CUDA-compatible runtime image preloaded on the PPU runner
         type: string
-        default: download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80
+        default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202610070948
 
 permissions:
   contents: read
-  # Downloading an artifact produced by another run needs the actions:read scope.
   actions: read
 cache-mode: none
 
@@ -41,30 +40,11 @@ concurrency:
 jobs:
   prepare:
     name: Resolve model matrix
-    runs-on: 8-ppu-m890p
+    runs-on: ubuntu-latest
     timeout-minutes: 10
-    container:
-      # The runtime image ships py312; reuse it so the selector always has python3.
-      image: ${{ inputs.image }}
     outputs:
       matrix: ${{ steps.select.outputs.matrix }}
     steps:
-      - name: Disable internal GitHub mirror rewrite
-        shell: bash
-        run: |
-          # The job container image ships a global/system git
-          # url.<internal-mirror>.insteadOf = https://github.com rewrite. Left in
-          # place it makes actions/checkout fetch from the internal mirror and
-          # fail, so strip only the github.com rewrites before checkout.
-          for scope in system global; do
-            echo "=== ${scope} insteadOf before ==="
-            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
-            while IFS= read -r section; do
-              [ -n "${section}" ] || continue
-              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
-            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
-          done
-
       - name: Require disabled cache access
         uses: actions/github-script@v7
         with:
@@ -72,12 +52,13 @@ jobs:
             if (process.env.ACTIONS_CACHE_MODE !== 'none') {
               core.setFailed('PPU CI requires cache-mode: none');
             }
+
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
         with:
-          github-server-url: https://github.com
           ref: ${{ inputs.pr_head_sha || github.sha }}
           persist-credentials: false
+
       - name: Verify checked-out revision
         env:
           EXPECTED_SHA: ${{ inputs.pr_head_sha || github.sha }}
@@ -85,9 +66,6 @@ jobs:
 
       - name: Select models
         id: select
-        shell: bash
-        # Pass the caller-controlled input through the environment (never inline
-        # it into the command) so a crafted value cannot inject shell.
         env:
           MODELS: ${{ inputs.models }}
         run: python3 scripts/ci/ppu_e2e_select.py "${MODELS}" >> "$GITHUB_OUTPUT"
@@ -97,30 +75,28 @@ jobs:
     needs: prepare
     runs-on: 8-ppu-m890p
     timeout-minutes: 120
-    container:
-      # Keep checkout, artifact download and scheduler control steps inside the
-      # pinned runtime container on the community runner. The scheduler action
-      # dispatches the real workload to a separate PPU pod.
-      image: ${{ inputs.image }}
     strategy:
-      # Each model occupies PPU cards independently; keep going if one fails.
       fail-fast: false
       matrix:
         model: ${{ fromJson(needs.prepare.outputs.matrix).include }}
-    steps:
-      - name: Disable internal GitHub mirror rewrite
+    env:
+      GIT_CONFIG_NOSYSTEM: "1"
+    defaults:
+      run:
         shell: bash
+    steps:
+      - name: Prepare private runtime directories and Git configuration
+        id: runtime
         run: |
-          # See the prepare job: strip the github.com insteadOf rewrites so
-          # actions/checkout and download-artifact reach github.com directly.
-          for scope in system global; do
-            echo "=== ${scope} insteadOf before ==="
-            git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null || true
-            while IFS= read -r section; do
-              [ -n "${section}" ] || continue
-              git config --${scope} --unset-all "${section}.insteadOf" 2>/dev/null || true
-            done < <(git config --${scope} --get-regexp '^url\..*\.insteadof$' 2>/dev/null | awk '$2 ~ /github\.com/ {sub(/\.insteadof$/, "", $1); print $1}')
-          done
+          config="$(mktemp "${RUNNER_TEMP}/git-config.XXXXXX")"
+          wheels="$(mktemp -d "${RUNNER_TEMP}/ppu-model-wheels.XXXXXX")"
+          artifacts="$(mktemp -d "${RUNNER_TEMP}/ppu-model-artifacts.XXXXXX")"
+          {
+            printf 'GIT_CONFIG_GLOBAL=%s\n' "$config"
+            printf 'wheels=%s\n' "$wheels"
+            printf 'artifacts=%s\n' "$artifacts"
+          } >> "$GITHUB_OUTPUT"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
 
       - name: Require disabled cache access
         uses: actions/github-script@v7
@@ -129,12 +105,14 @@ jobs:
             if (process.env.ACTIONS_CACHE_MODE !== 'none') {
               core.setFailed('PPU CI requires cache-mode: none');
             }
+
       - name: Check out vLLM SAIL
         uses: actions/checkout@v4
         with:
           github-server-url: https://github.com
           ref: ${{ inputs.pr_head_sha || github.sha }}
           persist-credentials: false
+
       - name: Verify checked-out revision
         env:
           EXPECTED_SHA: ${{ inputs.pr_head_sha || github.sha }}
@@ -144,46 +122,43 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ppu-wheels-${{ inputs.build_run_id }}
-          path: wheels
+          path: ${{ steps.runtime.outputs.wheels }}
           run-id: ${{ inputs.build_run_id }}
           repository: ${{ github.repository }}
           github-token: ${{ github.token }}
 
       - name: Require the expected wheel source and verified upstream pin
         if: inputs.pr_mode
-        shell: bash
         env:
+          WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}
           WHEEL_SOURCE_SHA: ${{ inputs.wheel_source_sha || inputs.pr_head_sha || github.sha }}
         run: |
           pin="$(tr -d '[:space:]' < .github/vllm-main-verified.commit)"
           [[ "${pin}" =~ ^[0-9a-f]{40}$ ]]
-          python scripts/ci/ppu_wheel_manifest.py verify wheels \
+          python3 scripts/ci/ppu_wheel_manifest.py verify "${WHEELS_DIR}" \
             --vllm-commit "${pin}" --sail-commit "${WHEEL_SOURCE_SHA}"
 
-      - name: Run PPU E2E smoke
-        uses: t-head/ppu-scheduler-action@main
+      - name: Run PPU E2E smoke in the preloaded CUDA-compatible runtime
+        env:
+          PPU_RUNTIME_IMAGE: ${{ inputs.image }}
+          PPU_CI_SOURCE_DIR: ${{ github.workspace }}
+          PPU_CI_SOURCE_SHA: ${{ inputs.pr_head_sha || github.sha }}
+          PPU_CI_WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}
+          PPU_CI_ARTIFACT_DIR: ${{ steps.runtime.outputs.artifacts }}
+          PPU_CI_DEVICE_COUNT: ${{ matrix.model.tp }}
+          MODEL_PATH: ${{ matrix.model.checkpoint }}
+          SERVED_NAME: ${{ matrix.model.served_name }}
+          TP_SIZE: ${{ matrix.model.tp }}
+          EXTRA_SERVE_FLAGS: ${{ matrix.model.extra_serve_flags }}
+        run: bash scripts/ci/ppu_runtime_container.sh model-test
+
+      - name: Upload model-test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          image: ${{ inputs.image }}
-          # Single node; nproc_per_node matches the tensor-parallel card count.
-          nnodes: 0
-          nproc_per_node: ${{ matrix.model.tp }}
-          namespace: ppu-sched
-          node_selector: board-type=${{ matrix.model.board }}
-          timeout_minutes: 90
-          cleanup_policy: always
-          source_dir: /workspace/source
-          # Ship the checked-out repo plus the downloaded wheels into the pod.
-          artifact_paths: wheels/**
-          # The manifest travels with the wheels; compatibility uses their real
-          # version. This smoke runs the Python frontend.
-          extra_env: MODEL_PATH=${{ matrix.model.checkpoint }},SERVED_NAME=${{ matrix.model.served_name }},TP_SIZE=${{ matrix.model.tp }},EXTRA_SERVE_FLAGS=${{ matrix.model.extra_serve_flags }},VLLM_USE_RUST_FRONTEND=0,VLLM_USE_RUST_BENCH=0,WHEELS_DIR=/workspace/source/wheels
-          container_options: |
-            privileged: true
-            host_ipc: true
-            host_network: true
-            shm_size: 32Gi
-          # Privileged pods see every card; bind the assigned ones before Python starts.
-          command: >-
-            cd /workspace/source &&
-            export CUDA_VISIBLE_DEVICES="${NVIDIA_VISIBLE_DEVICES:?Assigned devices are unavailable}" &&
-            bash scripts/ci/ppu_e2e_smoke.sh
+          name: ppu-model-${{ matrix.model.key }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.runtime.outputs.artifacts }}/**
+            ${{ steps.runtime.outputs.wheels }}/wheel-manifest.json
+          if-no-files-found: warn
+          retention-days: 14

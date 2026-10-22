@@ -32,7 +32,7 @@ cache-mode: none
 jobs:
   build:
     name: PPU wheel build
-    runs-on: 8-ppu-m890p
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     outputs:
       image: ${{ steps.image.outputs.image }}

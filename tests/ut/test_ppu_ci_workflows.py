@@ -3,7 +3,6 @@ import itertools
 import json
 import os
 import re
-import shlex
 import subprocess
 import sys
 import zipfile
@@ -19,9 +18,13 @@ EXPECTED_SHA = "${{ inputs.pr_head_sha || github.sha }}"
 DEFAULT_REF_GUARD = (
     "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
 )
-DEFAULT_IMAGE = (
+BUILD_IMAGE = (
     "download.t-head.cn/docker_release/pytorch@sha256:"
     "a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80"
+)
+RUNTIME_IMAGE = (
+    "reg.docker.alibaba-inc.com/ai-tmp/llm:"
+    "pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202610070948"
 )
 
 
@@ -62,21 +65,19 @@ def test_control_jobs_only_execute_trusted_code(name, job_id, ref):
         )
 
 
-@pytest.mark.parametrize(
-    "filename,job_ids",
-    [
-        ("_ppu-build.yaml", ("build",)),
-        ("ppu-ops-tests.yaml", ("ops-build",)),
-        ("_ppu-pin-ut.yaml", ("pin-unit-tests",)),
-        ("_ppu-model-tests.yaml", ("prepare", "e2e")),
-        ("_ppu-ops-tests.yaml", ("ops-tests",)),
-        ("upstream-reuse.yaml", ("resolve-build", "nightly-ppu-reuse")),
-    ],
-)
-def test_ppu_control_jobs_use_the_community_runner(filename, job_ids):
-    jobs = workflow(filename)["jobs"]
-    for job_id in job_ids:
-        assert jobs[job_id]["runs-on"] == "8-ppu-m890p"
+def test_ppu_jobs_use_hosted_build_and_self_hosted_runtime_runners():
+    assert workflow("_ppu-build.yaml")["jobs"]["build"]["runs-on"] == "ubuntu-24.04"
+    assert (
+        workflow("_ppu-model-tests.yaml")["jobs"]["prepare"]["runs-on"]
+        == "ubuntu-latest"
+    )
+    for filename, job_id in (
+        ("_ppu-pin-ut.yaml", "pin-unit-tests"),
+        ("_ppu-model-tests.yaml", "e2e"),
+        ("_ppu-ops-tests.yaml", "ops-tests"),
+        ("upstream-reuse.yaml", "nightly-ppu-reuse"),
+    ):
+        assert workflow(filename)["jobs"][job_id]["runs-on"] == "8-ppu-m890p"
 
 
 def test_controller_filters_comments_serializes_all_commands_and_reports_failure():
@@ -315,7 +316,12 @@ def test_pr_pipeline_structure():
     config = workflow("ppu-build-and-test.yaml")
     assert set(config[True]) == {"workflow_call", "pull_request"}
     inputs = config[True]["workflow_call"]["inputs"]
-    assert set(inputs) == {"pr_head_sha", "existing_build_run_id", "wheel_source_sha"}
+    assert set(inputs) == {
+        "pr_head_sha",
+        "existing_build_run_id",
+        "wheel_source_sha",
+        "runtime_image",
+    }
     assert inputs["pr_head_sha"]["type"] == "string"
     assert inputs["pr_head_sha"]["required"] is True
     for name in ("existing_build_run_id", "wheel_source_sha"):
@@ -357,7 +363,7 @@ def test_pr_pipeline_structure():
             "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
             "wheel_source_sha": "${{ inputs.wheel_source_sha || '' }}",
             "build_run_id": "${{ inputs.existing_build_run_id || github.run_id }}",
-            "image": "${{ needs.build.outputs.image || '" + DEFAULT_IMAGE + "' }}",
+            "image": "${{ inputs.runtime_image || '" + RUNTIME_IMAGE + "' }}",
         }
 
 
@@ -369,13 +375,13 @@ def test_ops_manual_entry_structure():
         "build_image": {
             "description": "Digest-pinned SDK image; CI installs the checksum-pinned SAIL Torch",
             "required": False,
-            "default": DEFAULT_IMAGE,
+            "default": BUILD_IMAGE,
             "type": "string",
         },
         "ops_image": {
             "description": "Digest-pinned operator runtime image matching the build stack",
             "required": False,
-            "default": DEFAULT_IMAGE,
+            "default": RUNTIME_IMAGE,
             "type": "string",
         },
         "ops_test_scope": {
@@ -432,10 +438,10 @@ def test_debug_structure():
     assert inputs["target"]["options"] == ["both", "pin-ut", "model-tests"]
     assert inputs["target"]["default"] == "both"
     assert inputs["models"]["type"] == "string"
-    assert inputs["models"]["default"] == "qwen3.8-27b,qwen3.8-27b-m890p"
+    assert inputs["models"]["default"] == "qwen3.8-27b-m890p"
     assert inputs["image"]["type"] == "string"
     assert inputs["image"]["required"] is True
-    assert inputs["image"]["default"] == DEFAULT_IMAGE
+    assert inputs["image"]["default"] == RUNTIME_IMAGE
     assert "concurrency" not in config
     jobs = config["jobs"]
     assert set(jobs) == {"pin-unit-tests", "model-tests"}
@@ -782,7 +788,7 @@ def expression(value, context):
     """Evaluate only the Boolean/context subset used by these workflow guards."""
     value = value.removeprefix("${{").removesuffix("}}").strip()
     value = re.sub(
-        r"\b(?:inputs|github|needs)(?:\.[\w*-]+)+",
+        r"\b(?:inputs|github|needs|steps)(?:\.[\w*-]+)+",
         lambda match: repr(context[match[0]]),
         value,
     )
@@ -1032,6 +1038,7 @@ def test_manifest_shell_checks_actual_source_and_current_pin(
         "inputs.pr_head_sha": head * 40,
         "github.sha": "d" * 40,
         "github.event.pull_request.head.sha": "b" * 40,
+        "steps.runtime.outputs.wheels": str(wheels),
     }
     env = {
         "PATH": str(Path(sys.executable).parent) + os.pathsep + os.defpath,
@@ -1080,51 +1087,26 @@ def test_manifest_shell_checks_actual_source_and_current_pin(
         ).read_text() == f"matches={str(not wrong_pin).lower()}\n"
 
 
-def scheduler_command(name):
-    for job in workflow(name)["jobs"].values():
-        for step in job.get("steps", []):
-            if "ppu-scheduler-action" in step.get("uses", ""):
-                return step["with"]["command"]
-    raise AssertionError(f"No scheduler step in {name}")
-
-
-# Privileged worker pods see every card on the host; without this binding the
-# runtime defaults to cards 0..N-1, which may belong to other jobs.
-@pytest.mark.parametrize(
-    "name,script",
-    [
-        ("_ppu-model-tests.yaml", "ppu_e2e_smoke.sh"),
-        ("_ppu-pin-ut.yaml", "ppu_pin_ut.sh"),
-    ],
-)
-@pytest.mark.parametrize("allocated", ["3", "6,7", None, ""])
-def test_device_workers_bind_allocated_cards_before_running(
-    tmp_path, name, script, allocated
-):
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    fake = bin_dir / "bash"
-    fake.write_text(
-        '#!/bin/sh\nprintf "%s %s\\n" "${CUDA_VISIBLE_DEVICES-<unset>}" "$*"\n'
+def test_runtime_workflows_use_the_checked_in_docker_wrapper():
+    pin = workflow("_ppu-pin-ut.yaml")["jobs"]["pin-unit-tests"]
+    model = workflow("_ppu-model-tests.yaml")["jobs"]["e2e"]
+    pin_step = next(
+        step
+        for step in pin["steps"]
+        if "ppu_runtime_container.sh" in step.get("run", "")
     )
-    fake.chmod(0o755)
-    env = {"PATH": f"{bin_dir}{os.pathsep}{os.defpath}", "CUDA_VISIBLE_DEVICES": "0,1"}
-    if allocated is not None:
-        env["NVIDIA_VISIBLE_DEVICES"] = allocated
-    command = scheduler_command(name).replace(
-        "/workspace/source", shlex.quote(str(ROOT))
+    model_step = next(
+        step
+        for step in model["steps"]
+        if "ppu_runtime_container.sh" in step.get("run", "")
     )
-    result = subprocess.run(
-        ["/bin/bash", "--noprofile", "--norc", "-c", command],
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=10,
+    assert pin_step["run"] == "bash scripts/ci/ppu_runtime_container.sh pin-ut"
+    assert pin_step["env"]["PPU_CI_DEVICE_COUNT"] == "1"
+    assert pin_step["env"]["PPU_RUNTIME_IMAGE"] == "${{ inputs.image }}"
+    assert model_step["run"] == "bash scripts/ci/ppu_runtime_container.sh model-test"
+    assert model_step["env"]["PPU_CI_DEVICE_COUNT"] == "${{ matrix.model.tp }}"
+    assert model_step["env"]["MODEL_PATH"] == "${{ matrix.model.checkpoint }}"
+    assert "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-pin-ut.yaml").read_text()
+    assert (
+        "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-model-tests.yaml").read_text()
     )
-    if not allocated:
-        assert result.returncode != 0
-        assert "NVIDIA_VISIBLE_DEVICES" in result.stderr
-        assert result.stdout == ""
-    else:
-        assert result.returncode == 0, result.stderr
-        assert result.stdout == f"{allocated} scripts/ci/{script}\n"

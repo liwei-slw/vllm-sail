@@ -64,13 +64,14 @@ def test_qwen_catalog_targets_both_boards(key: str, board: str) -> None:
         ("ppu-debug.yaml", "workflow_dispatch"),
     ],
 )
-def test_model_workflow_defaults_cover_both_boards(filename: str, event: str) -> None:
+def test_model_workflow_defaults_target_the_available_m890_runner(
+    filename: str, event: str
+) -> None:
     config = yaml.safe_load((WORKFLOW.parent / filename).read_text())
     models = config[True][event]["inputs"]["models"]["default"]
     catalog = json.loads(MODELS.read_text())
     matrix = _load_select().build_matrix(catalog, models)
     assert [(entry["key"], entry["board"]) for entry in matrix["include"]] == [
-        ("qwen3.8-27b", "OAM-810E"),
         ("qwen3.8-27b-m890p", "ZW-M890P"),
     ]
 
@@ -184,11 +185,13 @@ def test_e2e_workflow_is_call_only_and_uses_community_runner() -> None:
     assert "workflow_dispatch:" not in text
     assert "pull_request:" not in text
     assert "push:" not in text
-    # ppu-scheduler-action runs from the community self-hosted runner and
-    # dispatches the isolated PPU workload.
-    assert "runs-on: 8-ppu-m890p" in text
-    assert "t-head/ppu-scheduler-action@main" in text
-    assert "board-type=${{ matrix.model.board }}" in text
+    # Matrix selection stays on a hosted runner; runtime validation executes
+    # through the checked-in Docker wrapper on the PPU host.
+    workflow = yaml.safe_load(text)
+    assert workflow["jobs"]["prepare"]["runs-on"] == "ubuntu-latest"
+    assert workflow["jobs"]["e2e"]["runs-on"] == "8-ppu-m890p"
+    assert "ppu_runtime_container.sh model-test" in text
+    assert "ppu-scheduler-action" not in text
     assert "contents: read" in text
     # cross-run artifact download needs the actions:read scope.
     assert "actions: read" in text
@@ -246,26 +249,24 @@ def test_e2e_workflow_pulls_wheels_by_run_id() -> None:
     assert "ppu-wheels-${{ inputs.build_run_id }}" in text
 
 
-def test_e2e_workflow_keeps_python_frontend_and_privileged() -> None:
-    text = WORKFLOW.read_text()
-    assert "VLLM_VERSION=" not in text
-    assert "VLLM_USE_RUST_FRONTEND=0" in text
-    assert "VLLM_USE_RUST_BENCH=0" in text
-    assert "privileged: true" in text
-    # smoke work is delegated to the checked-in script, not inlined in YAML.
-    assert "scripts/ci/ppu_e2e_smoke.sh" in text
+def test_e2e_workflow_keeps_python_frontend_in_isolated_docker() -> None:
+    workflow_text = WORKFLOW.read_text()
+    smoke_text = SMOKE.read_text()
+    assert "VLLM_VERSION=" not in workflow_text
+    assert "VLLM_USE_RUST_FRONTEND=0" in smoke_text
+    assert "VLLM_USE_RUST_BENCH=0" in smoke_text
+    assert "PPU_RUNTIME_IMAGE" in workflow_text
+    assert "ppu_runtime_container.sh model-test" in workflow_text
+    # Smoke work is delegated through the checked-in runtime wrapper.
+    runtime_text = (ROOT / "scripts/ci/ppu_runtime_container.sh").read_text()
+    assert "/source/scripts/ci/ppu_e2e_smoke.sh" in runtime_text
 
 
-def test_e2e_workflow_gives_every_community_runner_job_a_container() -> None:
-    text = WORKFLOW.read_text()
-    # Keep every community-runner control job inside a pinned container so the
-    # checkout, artifact and scheduler environment remains reproducible.
-    runner_jobs = text.count("runs-on: 8-ppu-m890p")
-    container_decls = sum(
-        1 for line in text.splitlines() if line.strip() == "container:"
-    )
-    assert runner_jobs >= 1
-    assert container_decls >= runner_jobs, (runner_jobs, container_decls)
+def test_e2e_workflow_does_not_use_a_job_container_on_the_ppu_runner() -> None:
+    workflow = yaml.safe_load(WORKFLOW.read_text())
+    assert "container" not in workflow["jobs"]["e2e"]
+    assert workflow["jobs"]["e2e"]["runs-on"] == "8-ppu-m890p"
+    assert workflow["jobs"]["prepare"]["runs-on"] == "ubuntu-latest"
 
 
 def test_smoke_checks_manifest_before_install_and_uses_installed_package() -> None:

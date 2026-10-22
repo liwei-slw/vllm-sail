@@ -65,6 +65,13 @@ def test_build_script_uses_configurable_aliyun_pip_mirror() -> None:
     assert text.index("source /usr/local/PPU_SDK/envsetup.sh") < text.index(forced)
 
 
+def test_build_script_does_not_install_runtime_only_ppu_dependencies() -> None:
+    text = SCRIPT.read_text()
+    assert '-r "${ROOT_DIR}/requirements/build.txt"' in text
+    assert '-r "${ROOT_DIR}/requirements/ppu.txt"' not in text
+    assert "separate CUDA-compatible runtime image" in text
+
+
 def test_build_script_caps_parallelism_to_avoid_oom() -> None:
     text = SCRIPT.read_text()
     # Native PPU kernel compiles are memory-heavy; an unbounded MAX_JOBS OOM-kills
@@ -74,7 +81,7 @@ def test_build_script_caps_parallelism_to_avoid_oom() -> None:
     assert 'BUILD_JOBS="${BUILD_JOBS:-' in text
 
 
-def test_build_workflow_is_call_only_on_community_runner() -> None:
+def test_build_workflow_is_call_only_on_github_hosted_runner() -> None:
     import yaml
 
     text = WORKFLOW.read_text()
@@ -82,9 +89,9 @@ def test_build_workflow_is_call_only_on_community_runner() -> None:
     assert "workflow_dispatch:" not in text
     assert "pull_request:" not in text
     assert "push:" not in text
-    # Wheel builds run directly in a pinned container on the community runner;
-    # they must not dispatch compilation through ppu-scheduler-action.
-    assert "runs-on: 8-ppu-m890p" in text
+    # The CUDA-free wheel build runs in its pinned container on a GitHub-hosted
+    # runner; scarce PPU runners are reserved for runtime validation.
+    assert "runs-on: ubuntu-24.04" in text
     assert "ppu-scheduler-action" not in text
     assert "contents: read" in text
 
@@ -206,27 +213,41 @@ def test_image_build_captures_the_pinned_image_stack_before_building():
     assert verify < text.index("status=succeeded")
 
 
-def test_all_ci_paths_use_the_same_pinned_image_stack():
+def test_ci_uses_separate_pinned_build_and_runtime_stacks():
     import yaml
 
-    image = "download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80"
+    build_image = (
+        "download.t-head.cn/docker_release/pytorch@sha256:"
+        "a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80"
+    )
+    runtime_image = (
+        "reg.docker.alibaba-inc.com/ai-tmp/llm:"
+        "pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202610070948"
+    )
     workflow = yaml.safe_load(WORKFLOW.read_text())
     inputs = yaml.safe_load((WORKFLOW.parent / "ppu-ops-tests.yaml").read_text())[True][
         "workflow_dispatch"
     ]["inputs"]
     assert not {"sdk_url", "torch_url"} & inputs.keys()
-    assert inputs["build_image"]["default"] == image
-    assert inputs["ops_image"]["default"] == image
+    assert inputs["build_image"]["default"] == build_image
+    assert inputs["ops_image"]["default"] == runtime_image
     build = workflow["jobs"]["build"]
-    assert image in build["container"]["image"]
+    assert build_image in build["container"]["image"]
     assert build["env"]["VLLM_SAIL_BUILD_IMAGE"] == build["container"]["image"]
     pipeline = yaml.safe_load((WORKFLOW.parent / "ppu-build-and-test.yaml").read_text())
+    assert (
+        pipeline[True]["workflow_call"]["inputs"]["runtime_image"]["default"]
+        == runtime_image
+    )
     for job in ("pin-unit-tests", "model-tests"):
-        assert "needs.build.outputs.image" in pipeline["jobs"][job]["with"]["image"]
+        assert (
+            pipeline["jobs"][job]["with"]["image"]
+            == "${{ inputs.runtime_image || '" + runtime_image + "' }}"
+        )
     for name in ("_ppu-pin-ut.yaml", "_ppu-model-tests.yaml", "ppu-debug.yaml"):
         triggers = yaml.safe_load((WORKFLOW.parent / name).read_text())[True]
         for trigger in triggers.values():
-            assert trigger["inputs"]["image"]["default"] == image
+            assert trigger["inputs"]["image"]["default"] == runtime_image
 
 
 @pytest.fixture
@@ -652,7 +673,11 @@ def test_prepare_records_replacement_provenance_and_checks_header(
 
     monkeypatch.setattr(subprocess, "run", install)
     argv = ["stack", "prepare", "--sdk", str(sdk), "--output", str(output)]
-    monkeypatch.setattr(sys, "argv", [*argv, "--constraints", str(constraints)])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [*argv, "--constraints", str(constraints), "--require-ppu-headers"],
+    )
     if not header:
         with pytest.raises(ValueError, match="compatible_wrapper.h"):
             image_stack.main()
