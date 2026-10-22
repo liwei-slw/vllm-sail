@@ -11,7 +11,7 @@
 schema = 1
 vllm_version_range = ">=0.31.0,<0.32.0"
 key_interface_count = 10
-target_count = 261
+target_count = 265
 
 [[key_interface]]
 symbol = "vllm.platforms.interface.PlatformEnum"
@@ -1672,6 +1672,38 @@ module = "vllm/models/kimi_k3/nvidia/model.py"
 symbol = "KimiRoutedOutputTransform.forward"
 present = true
 fingerprint = "sha256:82d672f98450ec92117cb7a8a39de7cac5e84d99e190614319005ae41e6e7c49"
+
+[[patch_target]]
+name = "vllm.models.kimi_k3.nvidia.model.attn_res"
+kind = "module"
+module = "vllm/models/kimi_k3/nvidia/model.py"
+symbol = "attn_res"
+present = true
+fingerprint = "sha256:49be260dfe03b324eabddc03ddbafcbf00b28ea82f86546a013e7557dc43f64e"
+
+[[patch_target]]
+name = "vllm.models.kimi_k3.nvidia.ops.attn_res._attn_res_kernel"
+kind = "module"
+module = "vllm/models/kimi_k3/nvidia/ops/attn_res.py"
+symbol = "_attn_res_kernel"
+present = true
+fingerprint = "sha256:ec99c9fcf4cec148927e2690791f7ab71dad0af89958741a1e445bb9c12c0385"
+
+[[patch_target]]
+name = "vllm.models.kimi_k3.nvidia.ops.attn_res.attn_res"
+kind = "module"
+module = "vllm/models/kimi_k3/nvidia/ops/attn_res.py"
+symbol = "attn_res"
+present = true
+fingerprint = "sha256:17b3731bcd924f3b2036d8c7d638c23753eef5ea7e87f8f7f7ff9402c0caaf7e"
+
+[[patch_target]]
+name = "vllm.models.kimi_k3.nvidia.ops.attn_res.attn_res_triton_config"
+kind = "module"
+module = "vllm/models/kimi_k3/nvidia/ops/attn_res.py"
+symbol = "attn_res_triton_config"
+present = false
+fingerprint = ""
 
 [[patch_target]]
 name = "vllm.platforms.interface.Platform.is_ppu"

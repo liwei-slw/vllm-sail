@@ -54,6 +54,11 @@
         "test_ids": ["kda"]
       },
       {
+        "id": "kimi-attn-res-python",
+        "paths": ["vllm_sail/patch/performance/kimi_k3_attn_res.py"],
+        "test_ids": ["kimi-attn-res"]
+      },
+      {
         "id": "merge-mla-python",
         "paths": ["vllm_sail/attention/ops/merge_attn_states.py"],
         "test_ids": ["merge-mla"]
@@ -80,6 +85,7 @@
     {"id": "gdn-prefill", "test": "tests/e2e/gdn/test_gdn_pla_prefill.py", "boards": ["ppu10", "ppu15"], "requires": ["pla", "pla.prefill.flashqla", "pla.prefill.flashqla.ops", "torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "kda", "test": "tests/e2e/gdn/test_kda.py", "boards": ["ppu10", "ppu15"], "requires": ["pla", "pla.decode.kda", "pla.prefill.flashkdapro", "torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "indexer-int8-cache", "test": "tests/e2e/test_indexer_int8_cache.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
+    {"id": "kimi-attn-res", "test": "tests/e2e/test_kimi_k3_attn_res.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "kimi-mla", "test": "tests/e2e/tier_b/test_kimi_k3.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "merge-mla", "test": "tests/e2e/tier_b/test_merge_and_mla.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {}},
     {"id": "minimax", "test": "tests/e2e/tier_b/test_minimax_m3.py", "boards": ["ppu10", "ppu15"], "requires": ["torch", "triton", "vllm", "vllm_sail"], "board_overrides": {"test_sparse_full_fp8_index": ["ppu15"]}},

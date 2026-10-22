@@ -7,6 +7,7 @@ running them. They require a PPU device and are separate from the CPU unit tests
 | Tool | Purpose |
 | --- | --- |
 | [`kernels/benchmark_ep_scatters.py`](kernels/benchmark_ep_scatters.py) | Expert-parallel scatter correctness and latency checks |
+| [`kernels/benchmark_kimi_k3_attn_res.py`](kernels/benchmark_kimi_k3_attn_res.py) | Kimi-K3 AttnRes Triton fallback latency per `(num_blocks, num_tokens)` shape, and launch-configuration sweeps |
 | [Fused MoE tuning](kernels/fusedmoe_tuning_tools/README.md) | Compile candidate Triton configurations, profile them and select configurations for a workload |
 
 Record the PPU card, SAIL SDK and PyTorch versions, vLLM revision, tensor shapes
