@@ -53,11 +53,55 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  runtime-image:
+    name: Resolve PPU runtime image
+    if: >-
+      ${{ github.event_name != 'pull_request' ||
+      (!github.event.pull_request.draft &&
+      contains(github.event.pull_request.labels.*.name, 'ci-preview')) }}
+    runs-on: 8-ppu-m890p
+    timeout-minutes: 10
+    outputs:
+      image: ${{ steps.resolve.outputs.image }}
+    env:
+      GIT_CONFIG_NOSYSTEM: "1"
+    steps:
+      - name: Prepare isolated runtime preflight checkout
+        id: workspace
+        run: |
+          config="$(mktemp "${RUNNER_TEMP}/git-config.XXXXXX")"
+          source_rel=".ppu-runtime-preflight-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          source="${GITHUB_WORKSPACE}/${source_rel}"
+          {
+            printf 'GIT_CONFIG_GLOBAL=%s\n' "$config"
+            printf 'source_rel=%s\n' "$source_rel"
+            printf 'source=%s\n' "$source"
+          } >> "$GITHUB_OUTPUT"
+          printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
+
+      - name: Check out vLLM SAIL
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.pr_head_sha || github.sha }}
+          path: ${{ steps.workspace.outputs.source_rel }}
+          persist-credentials: false
+
+      - name: Resolve a preloaded CUDA-compatible runtime
+        id: resolve
+        env:
+          SOURCE_DIR: ${{ steps.workspace.outputs.source }}
+          RUNTIME_IMAGE_OVERRIDE: ${{ inputs.runtime_image || '' }}
+        run: |
+          image="$(bash "${SOURCE_DIR}/scripts/ci/ppu_runtime_image.sh" "${RUNTIME_IMAGE_OVERRIDE}")"
+          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: runtime-image
     if: >-
       ${{ (github.event_name != 'pull_request' ||
       (!github.event.pull_request.draft &&
       contains(github.event.pull_request.labels.*.name, 'ci-preview'))) &&
+      needs.runtime-image.result == 'success' &&
       (inputs.existing_build_run_id || '') == '' }}
     permissions:
       contents: read
@@ -68,9 +112,10 @@ jobs:
 
   pin-unit-tests:
     name: PPU pin UT
-    needs: build
+    needs: [runtime-image, build]
     if: >-
       ${{ !cancelled() &&
+      needs.runtime-image.result == 'success' &&
       (github.event_name != 'pull_request' ||
       (!github.event.pull_request.draft &&
       contains(github.event.pull_request.labels.*.name, 'ci-preview'))) &&
@@ -87,13 +132,14 @@ jobs:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha || '' }}
-      image: ${{ inputs.runtime_image || '' }}
+      image: ${{ needs.runtime-image.outputs.image }}
 
   model-tests:
     name: PPU model tests
-    needs: build
+    needs: [runtime-image, build]
     if: >-
       ${{ !cancelled() &&
+      needs.runtime-image.result == 'success' &&
       (github.event_name != 'pull_request' ||
       (!github.event.pull_request.draft &&
       contains(github.event.pull_request.labels.*.name, 'ci-preview'))) &&
@@ -110,11 +156,11 @@ jobs:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha || '' }}
-      image: ${{ inputs.runtime_image || '' }}
+      image: ${{ needs.runtime-image.outputs.image }}
 
   gate:
     name: PPU CI gate
-    needs: [build, pin-unit-tests, model-tests]
+    needs: [runtime-image, build, pin-unit-tests, model-tests]
     if: >-
       ${{ always() &&
       (github.event_name != 'pull_request' ||
@@ -136,6 +182,9 @@ jobs:
           results = json.loads(os.environ["JOB_RESULTS"])
           for job, result in results.items():
               print(f"{job}: {result['result']}")
+          runtime_image = results.get("runtime-image", {}).get("result")
+          if runtime_image != "success":
+              raise SystemExit(f"runtime image preflight did not succeed: {runtime_image}")
           build = results.get("build", {}).get("result")
           reuse = os.environ["EXISTING_BUILD_RUN_ID"] and os.environ["WHEEL_SOURCE_SHA"]
           if build != "success" and not (build == "skipped" and reuse):

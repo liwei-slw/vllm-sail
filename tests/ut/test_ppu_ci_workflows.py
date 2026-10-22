@@ -335,14 +335,30 @@ def test_pr_pipeline_structure():
         assert inputs[name]["default"] == ""
         assert not inputs[name].get("required", False)
     jobs = config["jobs"]
-    assert set(jobs) == {"build", "pin-unit-tests", "model-tests", "gate"}
+    assert set(jobs) == {
+        "runtime-image",
+        "build",
+        "pin-unit-tests",
+        "model-tests",
+        "gate",
+    }
+    runtime = jobs["runtime-image"]
+    assert runtime["runs-on"] == "8-ppu-m890p"
+    assert runtime["outputs"]["image"] == "${{ steps.resolve.outputs.image }}"
+    resolve = next(step for step in runtime["steps"] if step.get("id") == "resolve")
+    assert "ppu_runtime_image.sh" in resolve["run"]
     build = jobs["build"]
     assert "ci-preview" in build["if"]
     assert "inputs.existing_build_run_id || ''" in build["if"]
     assert build["uses"] == "./.github/workflows/_ppu-build.yaml"
     assert build["with"] == {"pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}"}
-    assert "needs" not in build
-    assert jobs["gate"]["needs"] == ["build", "pin-unit-tests", "model-tests"]
+    assert build["needs"] == "runtime-image"
+    assert jobs["gate"]["needs"] == [
+        "runtime-image",
+        "build",
+        "pin-unit-tests",
+        "model-tests",
+    ]
     assert "always()" in jobs["gate"]["if"]
     assert "ci-preview" in jobs["gate"]["if"]
     gate = jobs["gate"]["steps"][0]
@@ -359,7 +375,7 @@ def test_pr_pipeline_structure():
     ):
         job = jobs[job_id]
         assert job["name"] == name
-        assert job["needs"] == "build"
+        assert job["needs"] == ["runtime-image", "build"]
         assert job["uses"] == f"./.github/workflows/{target}"
         assert "!cancelled()" in job["if"]
         assert "ci-preview" in job["if"]
@@ -369,7 +385,7 @@ def test_pr_pipeline_structure():
             "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
             "wheel_source_sha": "${{ inputs.wheel_source_sha || '' }}",
             "build_run_id": "${{ inputs.existing_build_run_id || github.run_id }}",
-            "image": "${{ inputs.runtime_image || '' }}",
+            "image": "${{ needs.runtime-image.outputs.image }}",
         }
 
 
@@ -622,6 +638,7 @@ def test_labeled_preview_propagates_merge_sha_to_build_and_test_checkouts(
         "inputs.pr_head_sha": "",
         "inputs.existing_build_run_id": "",
         "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "success",
         "needs.build.result": "success",
     }
     pipeline = workflow("ppu-build-and-test.yaml")["jobs"]
@@ -652,6 +669,7 @@ def test_preview_jobs_skip_without_an_active_ci_preview_label(labels, draft):
         "github.event.pull_request.labels.*.name": labels,
         "inputs.existing_build_run_id": "",
         "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "skipped",
         "needs.build.result": "skipped",
     }
     assert all(not expression(job["if"], context) for job in jobs.values())
@@ -880,6 +898,7 @@ def test_consumers_require_build_or_valid_reuse(build_jobs, build, run_id, sourc
         "github.event.pull_request.labels.*.name": [],
         "inputs.existing_build_run_id": run_id,
         "inputs.wheel_source_sha": source,
+        "needs.runtime-image.result": "success",
         "needs.build.result": build,
     }
     reuse = bool(run_id) and bool(source)
@@ -912,7 +931,8 @@ def test_gate_executes_fail_closed_truth_table(
             monkeypatch.setenv(
                 key, str(resolved).lower() if isinstance(resolved, bool) else resolved
             )
-    results = dict(
+    results = {"runtime-image": {"result": "success"}}
+    results.update(
         zip(
             ("build", "pin-unit-tests", "model-tests"),
             ({"result": state} for state in states),

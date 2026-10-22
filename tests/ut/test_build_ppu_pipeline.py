@@ -239,7 +239,7 @@ def test_ci_uses_separate_pinned_build_and_runtime_stacks():
     for job in ("pin-unit-tests", "model-tests"):
         assert (
             pipeline["jobs"][job]["with"]["image"]
-            == "${{ inputs.runtime_image || '' }}"
+            == "${{ needs.runtime-image.outputs.image }}"
         )
     for name in ("_ppu-pin-ut.yaml", "_ppu-model-tests.yaml", "ppu-debug.yaml"):
         triggers = yaml.safe_load((WORKFLOW.parent / name).read_text())[True]

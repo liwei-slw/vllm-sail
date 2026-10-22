@@ -238,7 +238,12 @@ def test_e2e_workflow_only_exposes_model_smoke() -> None:
     assert caller["jobs"]["model-tests"]["uses"] == (
         "./.github/workflows/_ppu-model-tests.yaml"
     )
-    assert caller["jobs"]["gate"]["needs"] == ["build", "pin-unit-tests", "model-tests"]
+    assert caller["jobs"]["gate"]["needs"] == [
+        "runtime-image",
+        "build",
+        "pin-unit-tests",
+        "model-tests",
+    ]
 
 
 def test_e2e_workflow_pulls_wheels_by_run_id() -> None:

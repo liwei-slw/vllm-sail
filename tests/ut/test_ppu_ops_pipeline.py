@@ -448,9 +448,14 @@ def test_manual_workflow_does_not_change_pr_gate():
     pipeline = yaml.safe_load(
         (ROOT / ".github/workflows/ppu-build-and-test.yaml").read_text()
     )["jobs"]
-    assert pipeline["gate"]["needs"] == ["build", "pin-unit-tests", "model-tests"]
+    assert pipeline["gate"]["needs"] == [
+        "runtime-image",
+        "build",
+        "pin-unit-tests",
+        "model-tests",
+    ]
     assert not any("ops-" in job_id for job_id in pipeline)
-    assert "needs" not in pipeline["build"]
+    assert pipeline["build"]["needs"] == "runtime-image"
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/ppu-ops-tests.yaml").read_text()
     )

@@ -9,8 +9,6 @@ case "${mode}" in
     *) printf 'Unknown runtime mode: %s\n' "${mode}" >&2; exit 2 ;;
 esac
 
-runtime_image="${PPU_RUNTIME_IMAGE:-${PPU_CI_RUNTIME_IMAGE:-}}"
-: "${runtime_image:?Set PPU_RUNTIME_IMAGE or runner PPU_CI_RUNTIME_IMAGE}"
 : "${PPU_CI_SOURCE_DIR:?PPU_CI_SOURCE_DIR is required}"
 : "${PPU_CI_SOURCE_SHA:?PPU_CI_SOURCE_SHA is required}"
 : "${PPU_CI_WHEELS_DIR:?PPU_CI_WHEELS_DIR is required}"
@@ -75,16 +73,8 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if ! image_id=$(docker image inspect "${runtime_image}" --format '{{.Id}}' 9>&- 2>/dev/null); then
-    printf 'Runtime image is not preloaded; pulling %s\n' "${runtime_image}" >&2
-    docker pull "${runtime_image}" 9>&-
-    image_id=$(docker image inspect "${runtime_image}" --format '{{.Id}}' 9>&-)
-fi
-[[ "${image_id}" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-    echo "Docker did not resolve an immutable runtime image ID" >&2
-    exit 2
-}
-printf '%s\n' "${runtime_image}" >"${artifact_dir}/runtime-image.txt"
+image_id=$(bash "${source_dir}/scripts/ci/ppu_runtime_image.sh" "${PPU_RUNTIME_IMAGE:-}" 9>&-)
+printf '%s\n' "${PPU_RUNTIME_IMAGE:-${PPU_CI_RUNTIME_IMAGE:-auto}}" >"${artifact_dir}/runtime-image.txt"
 printf '%s\n' "${image_id}" >"${artifact_dir}/runtime-image-id.txt"
 
 container="${prefix}"
