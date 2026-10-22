@@ -101,14 +101,6 @@ set(PPU_DEFINES
   USE_CUDA=1
   USE_DISTRIBUTED=1)
 
-if(NOT PPU_COMPAT_DIR)
-  message(FATAL_ERROR
-    "PPU_COMPAT_DIR is not set. The vendored kernels use COMPATIBLE_ARCH and "
-    "COMPATIBLE_VERSION, which only a USE_SAIL torch's "
-    "<torch>/.ppu_compat/compatible_wrapper.h defines. setup.py normally "
-    "supplies this; see vllm_sail/native/toolchain.py.")
-endif()
-
 # ---------------------------------------------------------------------------
 # Source lists come from the upstream and plugin manifests through setup.py.
 # CMake never globs.
@@ -128,36 +120,42 @@ function(ppu_add_extension target)
   endif()
   target_include_directories(${target} PRIVATE
       "${CMAKE_CURRENT_SOURCE_DIR}/csrc/upstream"
-      "${CMAKE_CURRENT_SOURCE_DIR}/csrc"
-      "${PPU_COMPAT_DIR}")
+      "${CMAKE_CURRENT_SOURCE_DIR}/csrc")
   target_compile_definitions(${target} PRIVATE ${PPU_DEFINES})
+  # An unpatched Torch's Caffe2 config enables CMake's built-in CUDA language,
+  # which claims `.cu` after project() enabled HG. Invoked through CUDA the same
+  # hgcc binary also defines __CUDACC__, which those Torch headers need; a SAIL
+  # Torch leaves `.cu` to HG. PPU-only flags therefore cover both languages.
   # Force-included rather than #include'd: sailify only text-substitutes, so the
   # translated sources reference COMPATIBLE_* without ever including the header
-  # that defines them. torch's CUDAExtension path does exactly this.
-  # SHELL: is required, not cosmetic: the PPU torch fork's CMake config already
-  # force-includes this header by absolute path, and CMake de-duplicates the
-  # repeated `-include`, leaving the bare filename behind as a second input file.
+  # that defines them. SHELL: keeps `-include` and its operand one argument.
   target_compile_options(${target} PRIVATE
-    "SHELL:-include compatible_wrapper.h")
+    "SHELL:-include ppu_compat.h")
   # cmake-hgcc emits the standard in CMAKE_HG_FLAGS during project(), but the
   # SAIL TorchConfig can append its own -std=c++17 afterwards. Target options
   # follow global flags, so keep the requested HG standard authoritative here.
   target_compile_options(${target} PRIVATE
-    "$<$<COMPILE_LANGUAGE:HG>:-std=c++${CMAKE_HG_STANDARD}>")
+    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-std=c++${CMAKE_HG_STANDARD}>")
   # Upstream's FP8 conversion specializations are gated on ENABLE_FP8. The
   # native PPU SDK provides the HG equivalents translated by the port tool.
   target_compile_definitions(${target} PRIVATE
-    "$<$<COMPILE_LANGUAGE:HG>:ENABLE_FP8>")
+    "$<$<COMPILE_LANGUAGE:HG,CUDA>:ENABLE_FP8>")
   target_compile_options(${target} PRIVATE
-    "$<$<COMPILE_LANGUAGE:HG>:SHELL:-include ppu_kernel_compat.h>")
+    "$<$<COMPILE_LANGUAGE:HG,CUDA>:SHELL:-include ppu_kernel_compat.h>")
   # Match vLLM's get_torch_gpu_compiler_flags: its kernels require the SDK
   # half/BF16 operators and conversions that Torch's extension defaults disable.
   # Override only these targets, after Torch's global CMAKE_HG_FLAGS.
   target_compile_options(${target} PRIVATE
-    "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_HALF_OPERATORS__>"
-    "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_HALF_CONVERSIONS__>"
-    "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_HALF2_OPERATORS__>"
-    "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_BFLOAT16_CONVERSIONS__>")
+    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-U__HGGC_NO_HALF_OPERATORS__>"
+    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-U__HGGC_NO_HALF_CONVERSIONS__>"
+    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-U__HGGC_NO_HALF2_OPERATORS__>"
+    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-U__HGGC_NO_BFLOAT16_CONVERSIONS__>")
+  # Torch's cuda.cmake/hg_native.cmake pass --expt-extended-lambda, which
+  # defines __HGGCCC_EXTENDED_LAMBDA__. PPU libc++'s __functional/invoke.h
+  # then takes a device-only builtin path in a host-pass static_assert and
+  # fails to parse. The corpus has no extended device lambdas to lose.
+  target_compile_options(${target} PRIVATE
+    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-U__HGGCCC_EXTENDED_LAMBDA__>")
   target_link_libraries(${target} PRIVATE
     torch
     HGGC::toolkit)

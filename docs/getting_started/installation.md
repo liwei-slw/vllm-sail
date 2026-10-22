@@ -11,7 +11,7 @@ Use an SDK environment with the following components installed together:
 | Component | Requirement |
 | --- | --- |
 | SAIL SDK | Driver, HGGC headers, runtime libraries and `hgcc` compiler |
-| SAIL PyTorch | A PPU build with `.ppu_compat/compatible_wrapper.h` |
+| SAIL PyTorch | A PPU build of PyTorch from the SAIL fork |
 | Triton | The [Triton for SAIL](https://github.com/t-head/triton-for-sail) build matching your SDK |
 | Compute libraries | PPU builds of `acext`, `deep_gemm`, `flash_attn` and `flash_attn_3`, as needed by the selected backend |
 | Model-specific libraries | PPU FlashMLA, PLA, TileLang or DeepEP when required by the workload |

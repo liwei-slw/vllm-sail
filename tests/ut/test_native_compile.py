@@ -30,6 +30,26 @@ def _run(argv: list[str], *, env: dict[str, str] | None = None) -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def _write_native_sdk_stubs(sdk: Path) -> None:
+    """Headers ppu_compat.h takes directly on the HG toolchain."""
+    sdk.mkdir(exist_ok=True)
+    for header, body in {
+        "hggc.h": "#pragma once\n",
+        "acblas_v2.h": "#pragma once\n",
+        "hggc_fp16.h": "#pragma once\nstruct __ppu_half { unsigned short x; };\n",
+        "hggc_bf16.h": (
+            "#pragma once\n"
+            "struct __ppu_bfloat16 { unsigned short x; };\n"
+            "struct __ppu_bfloat162 { unsigned short x, y; };\n"
+            "struct __ppu_bfloat16_raw { unsigned short x; };\n"
+            "struct __ppu_bfloat162_raw { unsigned short x, y; };\n"
+        ),
+        "hggc_runtime_api.h": "#pragma once\n",
+        "hggc_runtime_api.hpp": "#pragma once\n",
+    }.items():
+        (sdk / header).write_text(body, encoding="utf-8")
+
+
 def test_gdn_native_binding_guards_are_enabled_by_the_build(tmp_path):
     """Preprocess shipped bindings with the target's actual build definitions."""
     compiler = _tool("c++")
@@ -365,6 +385,203 @@ int8_t compile_helpers(float input) {
     _run([compiler, "-std=c++17", "-fsyntax-only", *defines, str(unit)])
 
 
+@pytest.mark.parametrize(
+    ("hg_arch", "expected_arch"),
+    [(100, 800), (150, 890), (200, 200)],
+)
+def test_ppu_compat_maps_hggc_arches(
+    tmp_path: Path, hg_arch: int, expected_arch: int
+) -> None:
+    """Pin the arch mapping that used to come from the torch wheel."""
+    compiler = _tool("c++")
+    sdk = tmp_path / "sdk"
+    _write_native_sdk_stubs(sdk)
+    unit = tmp_path / "arch.cpp"
+    unit.write_text(
+        '#include "ppu_compat.h"\n'
+        f"static_assert(COMPATIBLE_ARCH == {expected_arch});\n"
+        f"static_assert(COMPATIBLE_ARCH_LIST == {expected_arch});\n",
+        encoding="utf-8",
+    )
+    _run(
+        [
+            compiler,
+            "-std=c++17",
+            "-I",
+            str(ROOT / "csrc"),
+            "-I",
+            str(sdk),
+            "-D__HGGCCC__=1",
+            f"-D__HGGC_ARCH__={hg_arch}",
+            "-fsyntax-only",
+            str(unit),
+        ]
+    )
+
+
+def test_ppu_compat_masks_the_nvidia_scalar_headers(tmp_path: Path) -> None:
+    """A stock Torch includes NVIDIA's scalar headers under __CUDACC__."""
+    compiler = _tool("c++")
+    sdk = tmp_path / "sdk"
+    _write_native_sdk_stubs(sdk)
+    unit = tmp_path / "scalars.cpp"
+    unit.write_text(
+        '#include "ppu_compat.h"\n'
+        "#ifndef __CUDA_FP16_H__\n"
+        "#error NVIDIA cuda_fp16.h would redefine the native half types\n"
+        "#endif\n"
+        "#ifndef __CUDA_BF16_H__\n"
+        "#error NVIDIA cuda_bf16.h would redefine the native bf16 types\n"
+        "#endif\n"
+        "static_assert(sizeof(__nv_bfloat16) == sizeof(__ppu_bfloat16));\n"
+        "static_assert(sizeof(__nv_bfloat162) == sizeof(__ppu_bfloat162));\n"
+        "static_assert(sizeof(__nv_bfloat16_raw) == sizeof(__ppu_bfloat16_raw));\n"
+        "static_assert(sizeof(__nv_bfloat162_raw) == sizeof(__ppu_bfloat162_raw));\n",
+        encoding="utf-8",
+    )
+    _run(
+        [
+            compiler,
+            "-std=c++17",
+            "-I",
+            str(ROOT / "csrc"),
+            "-I",
+            str(sdk),
+            "-D__HGGCCC__=1",
+            "-fsyntax-only",
+            str(unit),
+        ]
+    )
+
+
+def test_ppu_compat_leaves_the_arch_undefined_on_the_host_pass(
+    tmp_path: Path,
+) -> None:
+    compiler = _tool("c++")
+    unit = tmp_path / "host.cpp"
+    unit.write_text(
+        '#include "ppu_compat.h"\n'
+        "#ifdef COMPATIBLE_ARCH\n"
+        "#error COMPATIBLE_ARCH must mirror the device-only __CUDA_ARCH__\n"
+        "#endif\n"
+        "#ifdef COMPATIBLE_ARCH_LIST\n"
+        "#error COMPATIBLE_ARCH_LIST must mirror __CUDA_ARCH_LIST__\n"
+        "#endif\n"
+        "static_assert(COMPATIBLE_VERSION == 13000);\n"
+        "static_assert(COMPATIBLE_RT_VERSION == 13000);\n"
+        "#if __COMPATIBLECC_VER_MAJOR__ < 11\n"
+        "#error The corpus takes its CUDA >= 11 paths unconditionally\n"
+        "#endif\n"
+        "#if __COMPATIBLECC_VER_MAJOR__ * 10000 + "
+        "__COMPATIBLECC_VER_MINOR__ * 100 < 120800\n"
+        "#error grouped_topk_kernels.cu expects the CUDA >= 12.8 path\n"
+        "#endif\n",
+        encoding="utf-8",
+    )
+    _run([compiler, "-std=c++17", "-I", str(ROOT / "csrc"), "-fsyntax-only", str(unit)])
+
+
+def test_ppu_compat_covers_upstream_headers_that_omit_their_includes() -> None:
+    """cuda_utils.h uses int64_t and std::enable_if_t with only <stdio.h>."""
+    compiler = _tool("c++")
+    _run(
+        [
+            compiler,
+            "-std=c++17",
+            "-x",
+            "c++",
+            "-I",
+            str(ROOT / "csrc"),
+            "-include",
+            "ppu_compat.h",
+            "-fsyntax-only",
+            str(ROOT / "csrc/upstream/cuda_utils.h"),
+        ]
+    )
+
+
+def test_ppu_compat_supplies_the_sdk_types_cuda_utils_kernels_expands(
+    tmp_path: Path,
+) -> None:
+    """The TU whose CUDA_CHECK expansion failed on hgcc without the torch header."""
+    compiler = _tool("c++")
+    sdk = tmp_path / "sdk"
+    _write_native_sdk_stubs(sdk)
+    (sdk / "hggc.h").write_text(
+        "#pragma once\n"
+        "typedef enum hggcError { hggcSuccess = 0 } hggcError_t;\n"
+        "typedef enum { hggcDevAttrMaxSharedMemoryPerBlockOptin } hggcDeviceAttr;\n"
+        "const char* hggcGetErrorString(hggcError_t e);\n"
+        "hggcError_t hggcGetDevice(int* device);\n"
+        "hggcError_t hggcDeviceGetAttribute(int* value, hggcDeviceAttr attr, "
+        "int device);\n",
+        encoding="utf-8",
+    )
+    argv = [
+        compiler,
+        "-std=c++17",
+        "-x",
+        "c++",
+        "-D__HGGCCC__=1",
+        "-D__host__=",
+        "-D__device__=",
+        "-D__forceinline__=inline",
+        "-I",
+        str(ROOT / "csrc"),
+        "-I",
+        str(ROOT / "csrc/upstream"),
+        "-I",
+        str(sdk),
+        "-include",
+        "ppu_compat.h",
+        "-fsyntax-only",
+        str(ROOT / "csrc/upstream/libtorch_stable/cuda_utils_kernels.cu"),
+    ]
+    _run(argv)
+    # On the HG toolchain the umbrella is unconditional, like the torch
+    # header it replaces: it must not fall back to an __has_include probe.
+    bare = [
+        arg
+        for index, arg in enumerate(argv)
+        if not (arg == "-I" and argv[index + 1] == str(sdk)) and arg != str(sdk)
+    ]
+    result = subprocess.run(bare, capture_output=True, text=True)
+    assert result.returncode != 0
+    assert "hggc.h" in result.stderr
+
+
+@pytest.mark.parametrize("hg_toolchain", [True, False], ids=["hgcc", "host-probe"])
+def test_ppu_compat_keeps_the_sdk_umbrella_when_the_sdk_is_visible(
+    tmp_path: Path, hg_toolchain: bool
+) -> None:
+    """upstream torch_utils.h names acblasHandle_t without including acblas.
+
+    The umbrella must not depend on __has_include: hgcc does not reliably
+    evaluate it, so the HG compiler marker includes it unconditionally.
+    """
+    compiler = _tool("c++")
+    sdk = tmp_path / "sdk"
+    _write_native_sdk_stubs(sdk)
+    (sdk / "hggc.h").write_text(
+        "#pragma once\n#define HGGC_FROM_SDK 1\n", encoding="utf-8"
+    )
+    (sdk / "acblas_v2.h").write_text(
+        "#pragma once\n#define ACBLAS_FROM_SDK 1\n", encoding="utf-8"
+    )
+    unit = tmp_path / "umbrella.cpp"
+    unit.write_text(
+        '#include "ppu_compat.h"\n'
+        "static_assert(HGGC_FROM_SDK == 1);\n"
+        "static_assert(ACBLAS_FROM_SDK == 1);\n",
+        encoding="utf-8",
+    )
+    argv = [compiler, "-std=c++17", "-I", str(ROOT / "csrc"), "-I", str(sdk)]
+    if hg_toolchain:
+        argv.append("-D__HGGCCC__=1")
+    argv += ["-fsyntax-only", str(unit)]
+    _run(argv)
+
+
 @pytest.mark.parametrize("torch_force_include", [False, True])
 @pytest.mark.parametrize("hg_standard", [17, 20])
 def test_extension_options_survive_torch_config(
@@ -372,13 +589,13 @@ def test_extension_options_survive_torch_config(
 ) -> None:
     cmake = _tool("cmake")
     compiler = _tool("c++")
-    compat = tmp_path / "torch compat"
-    compat.mkdir()
-    (compat / "compatible_wrapper.h").write_text(
-        "#pragma once\n#define COMPATIBLE_VERSION 12000\n", encoding="utf-8"
+    torch_include = tmp_path / "torch include"
+    torch_include.mkdir()
+    (torch_include / "torch_force_include.h").write_text(
+        "#pragma once\n#define TORCH_FORCE_INCLUDED 1\n", encoding="utf-8"
     )
     # Model the SDK namespace contract. Compile
-    # our real compatibility header, with no SDK or torch dependency in the gate.
+    # our real compatibility headers, with no SDK or torch dependency in the gate.
     csrc = tmp_path / "csrc"
     (csrc / "cub").mkdir(parents=True)
     (csrc / "cub/util_namespace.cuh").write_text(
@@ -389,9 +606,8 @@ def test_extension_options_survive_torch_config(
         "#else\nnamespace cub { struct Scan {}; }\n#endif\n",
         encoding="utf-8",
     )
-    kernel_compat = ROOT / "csrc/ppu_kernel_compat.h"
-    if kernel_compat.exists():
-        shutil.copyfile(kernel_compat, csrc / kernel_compat.name)
+    for header in ("ppu_kernel_compat.h", "ppu_compat.h"):
+        shutil.copyfile(ROOT / "csrc" / header, csrc / header)
     # Plugin headers must win over same-named upstream headers.
     for folder in ("plugin", "upstream"):
         (csrc / folder).mkdir()
@@ -400,8 +616,15 @@ def test_extension_options_survive_torch_config(
             if folder == "plugin"
             else '#error "upstream header shadows the plugin header"\n'
         )
+    torch_gate = (
+        "#ifndef TORCH_FORCE_INCLUDED\n"
+        "#error Torch's force-include was dropped\n"
+        "#endif\n"
+        if torch_force_include
+        else ""
+    )
     (tmp_path / "binding.cpp").write_text(
-        "static_assert(COMPATIBLE_VERSION == 12000);\n"
+        torch_gate + "static_assert(COMPATIBLE_VERSION == 13000);\n"
         "static_assert(__cplusplus == 202002L);\n"
         "#ifdef CUB_NS_QUALIFIER\n#error HG headers leaked into CXX\n#endif\n",
         encoding="utf-8",
@@ -416,7 +639,8 @@ def test_extension_options_survive_torch_config(
         " || defined(__HGGC_NO_HALF2_OPERATORS__)"
         " || defined(__HGGC_NO_BFLOAT16_CONVERSIONS__)\n"
         "#error Upstream kernels require SDK scalar operators and conversions\n#endif\n"
-        "static_assert(COMPATIBLE_VERSION == 12000);\n"
+        + torch_gate
+        + "static_assert(COMPATIBLE_VERSION == 13000);\n"
         f"static_assert(__cplusplus == {201703 if hg_standard == 17 else 202002}L);\n",
         encoding="utf-8",
     )
@@ -461,7 +685,7 @@ set(CMAKE_HG_INFORMATION_LOADED TRUE)
     assert function is not None
     torch_options = (
         "target_compile_options(torch INTERFACE -include "
-        '"${PPU_COMPAT_DIR}/compatible_wrapper.h")\n'
+        f'"{torch_include.as_posix()}/torch_force_include.h")\n'
         "target_compile_definitions(torch INTERFACE CUB_WRAPPED_NAMESPACE=at_cuda_detail)"
         if torch_force_include
         else ""
@@ -476,7 +700,6 @@ set(CMAKE_HG_STANDARD {hg_standard})
 # cmake-hgcc selects the requested standard before TorchConfig appends flags.
 # Reproduce the log's later -std=c++17 overriding the requested C++20.
 set(CMAKE_HG_FLAGS "-std=c++${{CMAKE_HG_STANDARD}} -std=c++17 -D__HGGC_NO_HALF_OPERATORS__ -D__HGGC_NO_HALF_CONVERSIONS__ -D__HGGC_NO_HALF2_OPERATORS__ -D__HGGC_NO_BFLOAT16_CONVERSIONS__")
-set(PPU_COMPAT_DIR "{compat.as_posix()}")
 set(PPU_EXT_OUTPUT_DIR "${{CMAKE_BINARY_DIR}}/extensions")
 add_library(torch INTERFACE)
 add_library(HGGC::toolkit INTERFACE IMPORTED)
