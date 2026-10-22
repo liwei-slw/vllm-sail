@@ -91,10 +91,14 @@ jobs:
           config="$(mktemp "${RUNNER_TEMP}/git-config.XXXXXX")"
           wheels="$(mktemp -d "${RUNNER_TEMP}/ppu-model-wheels.XXXXXX")"
           artifacts="$(mktemp -d "${RUNNER_TEMP}/ppu-model-artifacts.XXXXXX")"
+          source_rel=".ppu-model-source-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          source="${GITHUB_WORKSPACE}/${source_rel}"
           {
             printf 'GIT_CONFIG_GLOBAL=%s\n' "$config"
             printf 'wheels=%s\n' "$wheels"
             printf 'artifacts=%s\n' "$artifacts"
+            printf 'source_rel=%s\n' "$source_rel"
+            printf 'source=%s\n' "$source"
           } >> "$GITHUB_OUTPUT"
           printf 'GIT_CONFIG_GLOBAL=%s\n' "$config" >> "$GITHUB_ENV"
 
@@ -111,12 +115,14 @@ jobs:
         with:
           github-server-url: https://github.com
           ref: ${{ inputs.pr_head_sha || github.sha }}
+          path: ${{ steps.runtime.outputs.source_rel }}
           persist-credentials: false
 
       - name: Verify checked-out revision
         env:
           EXPECTED_SHA: ${{ inputs.pr_head_sha || github.sha }}
-        run: test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$EXPECTED_SHA"
+          SOURCE_DIR: ${{ steps.runtime.outputs.source }}
+        run: test "$(git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Download CI-built wheels
         uses: actions/download-artifact@v4
@@ -130,7 +136,7 @@ jobs:
       - name: Run PPU E2E smoke in the preloaded CUDA-compatible runtime
         env:
           PPU_RUNTIME_IMAGE: ${{ inputs.image }}
-          PPU_CI_SOURCE_DIR: ${{ github.workspace }}
+          PPU_CI_SOURCE_DIR: ${{ steps.runtime.outputs.source }}
           PPU_CI_SOURCE_SHA: ${{ inputs.pr_head_sha || github.sha }}
           PPU_CI_WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}
           PPU_CI_ARTIFACT_DIR: ${{ steps.runtime.outputs.artifacts }}
@@ -141,7 +147,7 @@ jobs:
           SERVED_NAME: ${{ matrix.model.served_name }}
           TP_SIZE: ${{ matrix.model.tp }}
           EXTRA_SERVE_FLAGS: ${{ matrix.model.extra_serve_flags }}
-        run: bash scripts/ci/ppu_runtime_container.sh model-test
+        run: bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" model-test
 
       - name: Upload model-test diagnostics
         if: always()

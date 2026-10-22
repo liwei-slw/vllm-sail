@@ -246,10 +246,18 @@ def test_every_pr_checkout_verifies_the_requested_sha_before_execution(name, job
         index = job["steps"].index(checkout)
         verify = job["steps"][index + 1]
         assert verify["env"]["EXPECTED_SHA"] == EXPECTED_SHA
-        assert (
-            'test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$EXPECTED_SHA"'
-            == verify["run"]
-        )
+        if "SOURCE_DIR" in verify["env"]:
+            assert checkout["with"]["path"] == "${{ steps.runtime.outputs.source_rel }}"
+            assert verify["env"]["SOURCE_DIR"] == "${{ steps.runtime.outputs.source }}"
+            assert (
+                'test "$(git -c safe.directory="$SOURCE_DIR" -C "$SOURCE_DIR" rev-parse HEAD)" = "$EXPECTED_SHA"'
+                == verify["run"]
+            )
+        else:
+            assert (
+                'test "$(git -c safe.directory="$PWD" rev-parse HEAD)" = "$EXPECTED_SHA"'
+                == verify["run"]
+            )
         guard = next(
             step
             for step in job["steps"]
@@ -302,7 +310,7 @@ def test_sha_verification_allows_different_owner_but_rejects_wrong_sha(
         result = subprocess.run(
             ["sh", "-e", "-c", command],
             cwd=tmp_path,
-            env={**env, "EXPECTED_SHA": expected},
+            env={**env, "EXPECTED_SHA": expected, "SOURCE_DIR": str(tmp_path)},
             capture_output=True,
             text=True,
         )
@@ -939,13 +947,23 @@ def test_runtime_workflows_use_the_checked_in_docker_wrapper():
         for step in model["steps"]
         if "ppu_runtime_container.sh" in step.get("run", "")
     )
-    assert pin_step["run"] == "bash scripts/ci/ppu_runtime_container.sh pin-ut"
+    assert (
+        pin_step["run"]
+        == 'bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" pin-ut'
+    )
     assert pin_step["env"]["PPU_CI_DEVICE_COUNT"] == "1"
     assert pin_step["env"]["PPU_RUNTIME_IMAGE"] == "${{ inputs.image }}"
     assert pin_step["env"]["PPU_CI_REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
-    assert model_step["run"] == "bash scripts/ci/ppu_runtime_container.sh model-test"
+    assert (
+        model_step["run"]
+        == 'bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" model-test'
+    )
     assert model_step["env"]["PPU_CI_DEVICE_COUNT"] == "${{ matrix.model.tp }}"
     assert model_step["env"]["PPU_CI_REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
+    assert pin_step["env"]["PPU_CI_SOURCE_DIR"] == "${{ steps.runtime.outputs.source }}"
+    assert (
+        model_step["env"]["PPU_CI_SOURCE_DIR"] == "${{ steps.runtime.outputs.source }}"
+    )
     assert model_step["env"]["MODEL_PATH"] == "${{ matrix.model.checkpoint }}"
     assert "ppu-scheduler-action" not in (WORKFLOWS / "_ppu-pin-ut.yaml").read_text()
     assert (

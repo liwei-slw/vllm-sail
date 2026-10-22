@@ -190,7 +190,7 @@ def test_e2e_workflow_is_call_only_and_uses_community_runner() -> None:
     workflow = yaml.safe_load(text)
     assert workflow["jobs"]["prepare"]["runs-on"] == "ubuntu-latest"
     assert workflow["jobs"]["e2e"]["runs-on"] == "8-ppu-m890p"
-    assert "ppu_runtime_container.sh model-test" in text
+    assert 'ppu_runtime_container.sh" model-test' in text
     assert "ppu-scheduler-action" not in text
     assert "contents: read" in text
     # cross-run artifact download needs the actions:read scope.
@@ -256,7 +256,7 @@ def test_e2e_workflow_keeps_python_frontend_in_isolated_docker() -> None:
     assert "VLLM_USE_RUST_FRONTEND=0" in smoke_text
     assert "VLLM_USE_RUST_BENCH=0" in smoke_text
     assert "PPU_RUNTIME_IMAGE" in workflow_text
-    assert "ppu_runtime_container.sh model-test" in workflow_text
+    assert 'ppu_runtime_container.sh" model-test' in workflow_text
     # Smoke work is delegated through the checked-in runtime wrapper.
     runtime_text = (ROOT / "scripts/ci/ppu_runtime_container.sh").read_text()
     assert "/source/scripts/ci/ppu_e2e_smoke.sh" in runtime_text
