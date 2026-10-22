@@ -26,10 +26,9 @@ vllm_sail_resolve_cmake_hgcc()
 # ---------------------------------------------------------------------------
 # HG language configuration. MUST precede project().
 # ---------------------------------------------------------------------------
-# Compile `.cu` sources with hgcc directly, so the ported corpus keeps upstream's
-# file names and a vLLM bump stays a mechanical diff. Do NOT also enable CMake's
-# built-in CUDA language: the extension mapping conflicts.
-set(CMAKE_HG_ENABLE_CU_EXTENSION ON)
+# Every compiled TU carries the `.hg` extension (the port renames upstream's
+# `.cu` sources), so the HG language compiles the whole corpus directly and no
+# `.cu` files remain for Torch's CMake config to claim.
 
 if(NOT CMAKE_HG_ARCHITECTURES)
   if(PYTORCH_SAIL_ARCH)
@@ -58,17 +57,6 @@ endif()
 set(CMAKE_HG_STANDARD_REQUIRED ON)
 
 project(vllm_sail_native LANGUAGES CXX HG)
-
-# cmake-hgcc v1.0.0 sets `hg` extensions in CMakeHGCompiler.cmake.in and only
-# re-adds `cu` afterwards in CMakeHGInformation.cmake. Assert rather than
-# discover a silent "no rule to make target" much later.
-if(NOT "cu" IN_LIST CMAKE_HG_SOURCE_FILE_EXTENSIONS)
-  message(FATAL_ERROR
-    "cmake-hgcc did not register the 'cu' source extension "
-    "(CMAKE_HG_SOURCE_FILE_EXTENSIONS=${CMAKE_HG_SOURCE_FILE_EXTENSIONS}). "
-    "CMAKE_HG_ENABLE_CU_EXTENSION support is required; check the cmake-hgcc "
-    "version at ${CMAKE_MODULE_PATH}.")
-endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -122,10 +110,6 @@ function(ppu_add_extension target)
       "${CMAKE_CURRENT_SOURCE_DIR}/csrc/upstream"
       "${CMAKE_CURRENT_SOURCE_DIR}/csrc")
   target_compile_definitions(${target} PRIVATE ${PPU_DEFINES})
-  # An unpatched Torch's Caffe2 config enables CMake's built-in CUDA language,
-  # which claims `.cu` after project() enabled HG. Invoked through CUDA the same
-  # hgcc binary also defines __CUDACC__, which those Torch headers need; a SAIL
-  # Torch leaves `.cu` to HG. PPU-only flags therefore cover both languages.
   # Force-included rather than #include'd: sailify only text-substitutes, so the
   # translated sources reference COMPATIBLE_* without ever including the header
   # that defines them. SHELL: keeps `-include` and its operand one argument.
@@ -135,27 +119,27 @@ function(ppu_add_extension target)
   # SAIL TorchConfig can append its own -std=c++17 afterwards. Target options
   # follow global flags, so keep the requested HG standard authoritative here.
   target_compile_options(${target} PRIVATE
-    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-std=c++${CMAKE_HG_STANDARD}>")
+    "$<$<COMPILE_LANGUAGE:HG>:-std=c++${CMAKE_HG_STANDARD}>")
   # Upstream's FP8 conversion specializations are gated on ENABLE_FP8. The
   # native PPU SDK provides the HG equivalents translated by the port tool.
   target_compile_definitions(${target} PRIVATE
-    "$<$<COMPILE_LANGUAGE:HG,CUDA>:ENABLE_FP8>")
+    "$<$<COMPILE_LANGUAGE:HG>:ENABLE_FP8>")
   target_compile_options(${target} PRIVATE
-    "$<$<COMPILE_LANGUAGE:HG,CUDA>:SHELL:-include ppu_kernel_compat.h>")
+    "$<$<COMPILE_LANGUAGE:HG>:SHELL:-include ppu_kernel_compat.h>")
   # Match vLLM's get_torch_gpu_compiler_flags: its kernels require the SDK
   # half/BF16 operators and conversions that Torch's extension defaults disable.
   # Override only these targets, after Torch's global CMAKE_HG_FLAGS.
   target_compile_options(${target} PRIVATE
-    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-U__HGGC_NO_HALF_OPERATORS__>"
-    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-U__HGGC_NO_HALF_CONVERSIONS__>"
-    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-U__HGGC_NO_HALF2_OPERATORS__>"
-    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-U__HGGC_NO_BFLOAT16_CONVERSIONS__>")
-  # Torch's cuda.cmake/hg_native.cmake pass --expt-extended-lambda, which
-  # defines __HGGCCC_EXTENDED_LAMBDA__. PPU libc++'s __functional/invoke.h
-  # then takes a device-only builtin path in a host-pass static_assert and
-  # fails to parse. The corpus has no extended device lambdas to lose.
+    "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_HALF_OPERATORS__>"
+    "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_HALF_CONVERSIONS__>"
+    "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_HALF2_OPERATORS__>"
+    "$<$<COMPILE_LANGUAGE:HG>:-U__HGGC_NO_BFLOAT16_CONVERSIONS__>")
+  # Torch's hg_native.cmake passes --extended-lambda, which defines
+  # __HGGCCC_EXTENDED_LAMBDA__. PPU libc++'s __functional/invoke.h then takes a
+  # device-only builtin path in a host-pass static_assert and fails to parse.
+  # The corpus has no extended device lambdas to lose.
   target_compile_options(${target} PRIVATE
-    "$<$<COMPILE_LANGUAGE:HG,CUDA>:-U__HGGCCC_EXTENDED_LAMBDA__>")
+    "$<$<COMPILE_LANGUAGE:HG>:-U__HGGCCC_EXTENDED_LAMBDA__>")
   target_link_libraries(${target} PRIVATE
     torch
     HGGC::toolkit)

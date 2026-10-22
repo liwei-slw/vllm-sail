@@ -77,7 +77,7 @@ def test_gdn_hg_helpers_commit_and_wait_for_pipeline_copies(tmp_path):
     """Exercise generated adapters against a deferred-copy SDK test double."""
     compiler = _tool("c++")
     source = (
-        ROOT / "csrc/upstream/libtorch_stable/gdn/fused_gdn_decode_kernel.cu"
+        ROOT / "csrc/upstream/libtorch_stable/gdn/fused_gdn_decode_kernel.hg"
     ).read_text()
     # Retain the actual SDK pipeline include and its guard, without unrelated
     # device/torch headers. The host test does not establish SDK compatibility.
@@ -217,7 +217,7 @@ def test_cmake_selects_architectures_before_enabling_hg(
         env.pop(name, None)
     env.update(environment)
     source = (ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
-    start = source.index("set(CMAKE_HG_ENABLE_CU_EXTENSION ON)")
+    start = source.index("if(NOT CMAKE_HG_ARCHITECTURES)")
     end = source.index("project(vllm_sail_native", start)
     script = tmp_path / "architectures.cmake"
     script.write_text(
@@ -236,7 +236,7 @@ def test_cmake_selects_architectures_before_enabling_hg(
 def test_grouped_topk_finite_check_disambiguates_sdk_scalars(tmp_path: Path) -> None:
     compiler = _tool("c++")
     source = (
-        ROOT / "csrc/upstream/libtorch_stable/moe/grouped_topk_kernels.cu"
+        ROOT / "csrc/upstream/libtorch_stable/moe/grouped_topk_kernels.hg"
     ).read_text(encoding="utf-8")
     start = source.index("template <typename T_OUT, typename T_IN>")
     end = source.index("// Scoring function enums", start)
@@ -286,7 +286,7 @@ def test_model_fused_kernels_use_ordinary_hg_launches(tmp_path, arch, model):
     """Preprocess actual generated sources for both PPU compatibility targets."""
     compiler = _tool("c++")
     source = (
-        ROOT / f"csrc/upstream/libtorch_stable/fused_{model}_kernel.cu"
+        ROOT / f"csrc/upstream/libtorch_stable/fused_{model}_kernel.hg"
     ).read_text()
     # The preprocessor needs no SDK definitions to evaluate the launch guards.
     source = re.sub(r"^\s*#\s*include[^\n]*", "", source, flags=re.MULTILINE)
@@ -419,6 +419,83 @@ def test_ppu_compat_maps_hggc_arches(
     )
 
 
+@pytest.mark.parametrize(("hg_arch", "expected_arch"), [(100, 800), (150, 890)])
+def test_ppu_compat_supplies_cuda_arch_on_the_device_pass(
+    tmp_path: Path, hg_arch: int, expected_arch: int
+) -> None:
+    """Stock torch device branches compile per-arch under ``__CUDA_ARCH__``.
+
+    The hgcc device pass defines ``__HGGC_ARCH__`` but not ``__CUDA_ARCH__``;
+    the compat header must derive the NVIDIA spelling from it.
+    """
+    compiler = _tool("c++")
+    sdk = tmp_path / "sdk"
+    _write_native_sdk_stubs(sdk)
+    unit = tmp_path / "device_emulation.cpp"
+    unit.write_text(
+        '#include "ppu_compat.h"\n'
+        "#ifndef __CUDACC__\n"
+        "#error both driver passes define __CUDACC__\n"
+        "#endif\n"
+        f"static_assert(__CUDA_ARCH__ == {expected_arch});\n",
+        encoding="utf-8",
+    )
+    _run(
+        [
+            compiler,
+            "-std=c++17",
+            "-I",
+            str(ROOT / "csrc"),
+            "-I",
+            str(sdk),
+            "-D__HGGCCC__=1",
+            f"-D__HGGC_ARCH__={hg_arch}",
+            "-fsyntax-only",
+            str(unit),
+        ]
+    )
+
+
+def test_ppu_compat_supplies_cudacc_but_not_cuda_arch_on_the_host_pass(
+    tmp_path: Path,
+) -> None:
+    """nvcc defines ``__CUDACC__`` in both passes and ``__CUDA_ARCH__`` in none.
+
+    Stock torch headers key on the first; per-arch device code keys on the
+    second, which must stay undefined wherever ``__HGGC_ARCH__`` is absent.
+    """
+    compiler = _tool("c++")
+    sdk = tmp_path / "sdk"
+    _write_native_sdk_stubs(sdk)
+    unit = tmp_path / "host_emulation.cpp"
+    unit.write_text(
+        '#include "ppu_compat.h"\n'
+        "#ifndef __CUDACC__\n"
+        "#error stock torch device branches require __CUDACC__\n"
+        "#endif\n"
+        "#ifdef __CUDA_ARCH__\n"
+        "#error __CUDA_ARCH__ must stay undefined without __HGGC_ARCH__\n"
+        "#endif\n"
+        "static_assert(__CUDACC_VER_MAJOR__ == 13);\n"
+        "static_assert(__CUDACC_VER_MINOR__ == 0);\n"
+        "static_assert(__CUDACC_VER_BUILD__ == 0);\n",
+        encoding="utf-8",
+    )
+    _run(
+        [
+            compiler,
+            "-std=c++17",
+            "-I",
+            str(ROOT / "csrc"),
+            "-I",
+            str(sdk),
+            "-D__HGGCCC__=1",
+            "-fsyntax-only",
+            str(unit),
+        ]
+    )
+
+
 def test_ppu_compat_masks_the_nvidia_scalar_headers(tmp_path: Path) -> None:
     """A stock Torch includes NVIDIA's scalar headers under __CUDACC__."""
     compiler = _tool("c++")
@@ -467,6 +544,12 @@ def test_ppu_compat_leaves_the_arch_undefined_on_the_host_pass(
         "#ifdef COMPATIBLE_ARCH_LIST\n"
         "#error COMPATIBLE_ARCH_LIST must mirror __CUDA_ARCH_LIST__\n"
         "#endif\n"
+        "#ifdef __CUDACC__\n"
+        "#error __CUDACC__ requires the hgcc driver\n"
+        "#endif\n"
+        "#ifdef __CUDA_ARCH__\n"
+        "#error __CUDA_ARCH__ requires the hgcc device pass\n"
+        "#endif\n"
         "static_assert(COMPATIBLE_VERSION == 13000);\n"
         "static_assert(COMPATIBLE_RT_VERSION == 13000);\n"
         "#if __COMPATIBLECC_VER_MAJOR__ < 11\n"
@@ -474,7 +557,7 @@ def test_ppu_compat_leaves_the_arch_undefined_on_the_host_pass(
         "#endif\n"
         "#if __COMPATIBLECC_VER_MAJOR__ * 10000 + "
         "__COMPATIBLECC_VER_MINOR__ * 100 < 120800\n"
-        "#error grouped_topk_kernels.cu expects the CUDA >= 12.8 path\n"
+        "#error grouped_topk_kernels.hg expects the CUDA >= 12.8 path\n"
         "#endif\n",
         encoding="utf-8",
     )
@@ -535,7 +618,7 @@ def test_ppu_compat_supplies_the_sdk_types_cuda_utils_kernels_expands(
         "-include",
         "ppu_compat.h",
         "-fsyntax-only",
-        str(ROOT / "csrc/upstream/libtorch_stable/cuda_utils_kernels.cu"),
+        str(ROOT / "csrc/upstream/libtorch_stable/cuda_utils_kernels.hg"),
     ]
     _run(argv)
     # On the HG toolchain the umbrella is unconditional, like the torch

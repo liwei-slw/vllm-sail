@@ -85,9 +85,7 @@ def test_sdist_includes_the_native_build_inputs() -> None:
 
     assert "include CMakeLists.txt" in manifest_in
     assert "recursive-include cmake *.cmake" in manifest_in
-    assert (
-        "recursive-include csrc *.cpp *.cu *.cuh *.hg *.h *.hpp *.toml" in manifest_in
-    )
+    assert "recursive-include csrc *.cpp *.cuh *.hg *.h *.hpp *.toml" in manifest_in
     assert "recursive-include requirements *.txt" in manifest_in
 
 
@@ -190,7 +188,7 @@ def test_built_wheel_and_sdist_are_self_contained(tmp_path: Path) -> None:
     with tarfile.open(sdist) as archive:
         sdist_names = set(archive.getnames())
     prefix = next(name.split("/", 1)[0] for name in sdist_names if "/" in name)
-    native_suffixes = {".cpp", ".cu", ".cuh", ".hg", ".h", ".hpp", ".toml"}
+    native_suffixes = {".cpp", ".cuh", ".hg", ".h", ".hpp", ".toml"}
     required_build_inputs = {
         f"{prefix}/{path.relative_to(root).as_posix()}"
         for path in (root / "csrc").rglob("*")

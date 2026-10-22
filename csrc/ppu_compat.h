@@ -96,3 +96,18 @@ typedef __ppu_bfloat162_raw __nv_bfloat162_raw;
 #endif
 #endif
 #endif
+
+// Un-sailified Torch wheels key their device branches on the NVIDIA macro
+// spellings, which for them the CUDA-compatible nvcc driver supplies. Every
+// translation unit here is compiled by the hgcc driver, which defines neither,
+// so supply both. __CUDACC__ holds in either pass; __CUDA_ARCH__ only where
+// __HGGC_ARCH__ marks the device pass, mapped like COMPATIBLE_ARCH above.
+#if defined(__HGGCCC__) && !defined(__CUDACC__)
+#define __CUDACC__ 1
+#define __CUDACC_VER_MAJOR__ __COMPATIBLECC_VER_MAJOR__
+#define __CUDACC_VER_MINOR__ __COMPATIBLECC_VER_MINOR__
+#define __CUDACC_VER_BUILD__ __COMPATIBLECC_VER_BUILD__
+#endif
+#if defined(__HGGC_ARCH__) && !defined(__CUDA_ARCH__)
+#define __CUDA_ARCH__ COMPATIBLE_ARCH
+#endif

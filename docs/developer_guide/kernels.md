@@ -22,8 +22,9 @@ Plugin headers resolve within that directory before searching upstream headers.
 
 The upstream generator uses [sailify](https://github.com/t-head/sailify) and
 declared transformations to produce HGGC build inputs. Upstream source
-filenames are retained for traceability; CMake assigns device sources to the HG
-language. Edit upstream inputs or transformations, then regenerate. Never
+filenames are retained except that compiled `.cu` sources become `.hg`, so
+CMake's HG language compiles every translation unit directly. Edit upstream
+inputs or transformations, then regenerate. Never
 hand-edit the generated upstream corpus or `excluded_ops.toml`; its manifest
 is the editable file inside `csrc/upstream/`.
 

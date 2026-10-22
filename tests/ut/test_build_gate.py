@@ -241,10 +241,10 @@ def test_conflicting_architecture_settings_fail_instead_of_losing_a_target(nowhe
 
 def test_cmake_defines_joins_source_lists_for_cmake(nowhere: str) -> None:
     sources = (
-        "csrc/upstream/libtorch_stable/layernorm_kernels.cu",
-        "csrc/upstream/libtorch_stable/cache_kernels.cu",
+        "csrc/upstream/libtorch_stable/layernorm_kernels.hg",
+        "csrc/upstream/libtorch_stable/cache_kernels.hg",
     )
-    moe_sources = ("csrc/upstream/libtorch_stable/moe/topk_softmax_kernels.cu",)
+    moe_sources = ("csrc/upstream/libtorch_stable/moe/topk_softmax_kernels.hg",)
     defines = toolchain.cmake_defines(sources, moe_sources, {"PATH": nowhere})
     assert defines["PPU_UPSTREAM_EXT_SRC"] == ";".join(sources)
     assert defines["PPU_UPSTREAM_MOE_EXT_SRC"] == ";".join(moe_sources)
