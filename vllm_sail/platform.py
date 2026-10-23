@@ -242,18 +242,19 @@ class PPUPlatform(NvmlCudaPlatform):
         ):
             from vllm.config.compilation import CUDAGraphMode
 
-            # Padded prefill segments produce incorrect results on this path.
-            # Keep compilation and uniform decode capture without capturing
-            # padded prefill. Explicitly disabled or full-only modes remain.
+            # Graph replay can corrupt padded prefill and batched decode on
+            # this path. Keep compilation without graph capture by default.
+            # Explicitly selected full-only modes remain user overrides.
             if compilation_config.cudagraph_mode in (
                 None,
                 CUDAGraphMode.PIECEWISE,
                 CUDAGraphMode.FULL_AND_PIECEWISE,
             ):
-                compilation_config.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+                compilation_config.cudagraph_mode = CUDAGraphMode.NONE
                 logger.info_once(
-                    "Using FULL_DECODE_ONLY for Qwen3.5 W8A8 INT8 on Zhenwu M890; "
-                    "padded prefill piecewise graphs produce incorrect outputs."
+                    "Disabling CUDA graphs by default for Qwen3.5 W8A8 INT8 on "
+                    "Zhenwu M890; padded prefill and batched decode graph replay "
+                    "can produce incorrect outputs."
                 )
 
         # 0 disables CUDA-graph-time split-KV heuristics, which measurably helps

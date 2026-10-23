@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Keep padded Qwen3.5 INT8 prefill out of CUDA graphs on Zhenwu M890."""
+"""Keep Qwen3.5 INT8 graph replay disabled by default on Zhenwu M890."""
 
 from __future__ import annotations
 
@@ -74,12 +74,12 @@ def config(mode=GraphMode.PIECEWISE):
 @pytest.mark.parametrize(
     "mode", [None, GraphMode.PIECEWISE, GraphMode.FULL_AND_PIECEWISE]
 )
-def test_qwen_w8a8_uses_decode_graphs_without_padded_prefill(platform, mode):
+def test_qwen_w8a8_disables_graphs_for_prefill_and_batched_decode(platform, mode):
     cfg = config(mode)
     platform.apply_config_platform_defaults(cfg)
-    assert cfg.compilation_config.cudagraph_mode is GraphMode.FULL_DECODE_ONLY
+    assert cfg.compilation_config.cudagraph_mode is GraphMode.NONE
     platform.apply_config_platform_defaults(cfg)
-    assert cfg.compilation_config.cudagraph_mode is GraphMode.FULL_DECODE_ONLY
+    assert cfg.compilation_config.cudagraph_mode is GraphMode.NONE
     assert cfg.compilation_config.custom_ops.count("+quant_fp8") == 1
     assert cfg.compilation_config.custom_ops.count("+sparse_attn_indexer") == 1
 
