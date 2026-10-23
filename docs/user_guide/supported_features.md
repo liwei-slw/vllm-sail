@@ -89,6 +89,16 @@ checkpoint revision, quantization, context length, parallelism and SDK when
 reporting a successful model run. Newly compiled model-specific operations need
 numerical and model-level validation on each target device.
 
+### Qwen3.5 MoE W8A8 INT8 graphs
+
+On Zhenwu M890, padded prefills for Qwen3.5 MoE W8A8 INT8 can produce incorrect
+text with piecewise CUDA graphs. vLLM SAIL selects `FULL_DECODE_ONLY` for this
+configuration, retaining compilation and decode CUDA graphs while executing
+prefills without graph padding.
+
+For installations without this default, set
+`--compilation-config '{"cudagraph_mode":"FULL_DECODE_ONLY"}'`.
+
 ## Selecting a backend
 
 See [Configuration](configuration.md) for runtime choices and defaults. Build
