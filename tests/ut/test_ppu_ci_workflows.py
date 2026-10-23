@@ -560,6 +560,7 @@ def test_preview_route_requires_the_ci_preview_label():
         assert "github.event_name != 'pull_request'" in guard
         assert "!github.event.pull_request.draft" in guard
         assert "ci-preview" in guard
+        assert "github.event.label.name == 'ci-preview'" in guard
 
 
 def test_preview_label_is_distinct_from_formal_ready_authorization():
@@ -578,14 +579,15 @@ def config_preview_guards():
 
 def test_preview_cancellation_is_per_pr_and_formal_calls_are_isolated():
     concurrency = workflow("ppu-build-and-test.yaml")["concurrency"]
-    assert (
-        concurrency["cancel-in-progress"]
-        == "${{ github.event_name == 'pull_request' }}"
-    )
+    cancel = concurrency["cancel-in-progress"]
+    assert "github.event.label.name == 'ci-preview'" in cancel
+
     groups = []
     for number in (49, 50):
         context = {
             "github.event_name": "pull_request",
+            "github.event.action": "synchronize",
+            "github.event.label.name": None,
             "github.event.pull_request.number": number,
             "github.run_id": "900",
         }
@@ -595,8 +597,10 @@ def test_preview_cancellation_is_per_pr_and_formal_calls_are_isolated():
             concurrency["group"],
         )
         assert group == f"ppu-build-and-test-{number}"
+        assert expression(cancel, context) is True
         groups.append(group)
     assert len(set(groups)) == 2
+
     formal = {
         "github.event_name": "workflow_dispatch",
         "github.event.pull_request.number": 0,
@@ -608,6 +612,59 @@ def test_preview_cancellation_is_per_pr_and_formal_calls_are_isolated():
         concurrency["group"],
     )
     assert group == "ppu-build-and-test-901"
+    assert expression(cancel, formal) is False
+
+
+def test_unrelated_label_events_do_not_cancel_or_start_preview():
+    config = workflow("ppu-build-and-test.yaml")
+    concurrency = config["concurrency"]
+    context = {
+        "github.event_name": "pull_request",
+        "github.event.action": "labeled",
+        "github.event.label.name": "ready",
+        "github.event.pull_request.number": 49,
+        "github.event.pull_request.draft": False,
+        "github.event.pull_request.labels.*.name": ["ci-preview", "ready"],
+        "github.run_id": "902",
+        "inputs.existing_build_run_id": "",
+        "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "skipped",
+        "needs.build.result": "skipped",
+    }
+    group = re.sub(
+        r"\$\{\{.*?\}\}",
+        lambda match: str(expression(match[0], context)),
+        concurrency["group"],
+    )
+    assert group == "ppu-build-and-test-902"
+    assert expression(concurrency["cancel-in-progress"], context) is False
+    assert all(not expression(job["if"], context) for job in config["jobs"].values())
+
+
+def test_removing_ci_preview_cancels_active_preview_without_starting_jobs():
+    config = workflow("ppu-build-and-test.yaml")
+    concurrency = config["concurrency"]
+    context = {
+        "github.event_name": "pull_request",
+        "github.event.action": "unlabeled",
+        "github.event.label.name": "ci-preview",
+        "github.event.pull_request.number": 49,
+        "github.event.pull_request.draft": False,
+        "github.event.pull_request.labels.*.name": [],
+        "github.run_id": "903",
+        "inputs.existing_build_run_id": "",
+        "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "skipped",
+        "needs.build.result": "skipped",
+    }
+    group = re.sub(
+        r"\$\{\{.*?\}\}",
+        lambda match: str(expression(match[0], context)),
+        concurrency["group"],
+    )
+    assert group == "ppu-build-and-test-49"
+    assert expression(concurrency["cancel-in-progress"], context) is True
+    assert all(not expression(job["if"], context) for job in config["jobs"].values())
 
 
 @pytest.mark.parametrize(
@@ -624,6 +681,8 @@ def test_labeled_preview_propagates_merge_sha_to_build_and_test_checkouts(
     merge_sha, head_sha = "a" * 40, "b" * 40
     context = {
         "github.event_name": "pull_request",
+        "github.event.action": "synchronize",
+        "github.event.label.name": None,
         "github.event.pull_request.draft": False,
         "github.event.pull_request.labels.*.name": ["ci-preview"],
         "github.sha": merge_sha,
@@ -659,6 +718,8 @@ def test_preview_jobs_skip_without_an_active_ci_preview_label(labels, draft):
     jobs = workflow("ppu-build-and-test.yaml")["jobs"]
     context = {
         "github.event_name": "pull_request",
+        "github.event.action": "synchronize",
+        "github.event.label.name": None,
         "github.event.pull_request.draft": draft,
         "github.event.pull_request.labels.*.name": labels,
         "inputs.existing_build_run_id": "",
@@ -813,7 +874,7 @@ def expression(value, context):
     value = value.removeprefix("${{").removesuffix("}}").strip()
     value = re.sub(
         r"\b(?:inputs|github|needs|steps)(?:\.[\w*-]+)+",
-        lambda match: repr(context[match[0]]),
+        lambda match: repr(context.get(match[0])),
         value,
     )
     value = value.replace("always()", "True").replace("cancelled()", "False")

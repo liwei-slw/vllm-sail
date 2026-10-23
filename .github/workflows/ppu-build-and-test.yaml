@@ -45,15 +45,22 @@ cache-mode: none
 concurrency:
   group: >-
     ppu-build-and-test-${{ github.event_name == 'pull_request' &&
+    ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+    github.event.label.name == 'ci-preview') &&
     github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request' &&
+    ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+    github.event.label.name == 'ci-preview') }}
 
 jobs:
   runtime-image:
     name: Resolve PPU runtime image
     if: >-
       ${{ github.event_name != 'pull_request' ||
-      (!github.event.pull_request.draft &&
+      ((((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'ci-preview')) &&
+      !github.event.pull_request.draft &&
       contains(github.event.pull_request.labels.*.name, 'ci-preview')) }}
     runs-on: 8-ppu-m890p
     timeout-minutes: 10
@@ -89,7 +96,9 @@ jobs:
     needs: runtime-image
     if: >-
       ${{ (github.event_name != 'pull_request' ||
-      (!github.event.pull_request.draft &&
+      ((((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'ci-preview')) &&
+      !github.event.pull_request.draft &&
       contains(github.event.pull_request.labels.*.name, 'ci-preview'))) &&
       needs.runtime-image.result == 'success' &&
       (inputs.existing_build_run_id || '') == '' }}
@@ -107,7 +116,9 @@ jobs:
       ${{ !cancelled() &&
       needs.runtime-image.result == 'success' &&
       (github.event_name != 'pull_request' ||
-      (!github.event.pull_request.draft &&
+      ((((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'ci-preview')) &&
+      !github.event.pull_request.draft &&
       contains(github.event.pull_request.labels.*.name, 'ci-preview'))) &&
       (needs.build.result == 'success' ||
       (needs.build.result == 'skipped' &&
@@ -130,7 +141,9 @@ jobs:
       ${{ !cancelled() &&
       needs.runtime-image.result == 'success' &&
       (github.event_name != 'pull_request' ||
-      (!github.event.pull_request.draft &&
+      ((((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'ci-preview')) &&
+      !github.event.pull_request.draft &&
       contains(github.event.pull_request.labels.*.name, 'ci-preview'))) &&
       (needs.build.result == 'success' ||
       (needs.build.result == 'skipped' &&
@@ -152,7 +165,9 @@ jobs:
     if: >-
       ${{ always() &&
       (github.event_name != 'pull_request' ||
-      (!github.event.pull_request.draft &&
+      ((((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
+      github.event.label.name == 'ci-preview')) &&
+      !github.event.pull_request.draft &&
       contains(github.event.pull_request.labels.*.name, 'ci-preview'))) }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
