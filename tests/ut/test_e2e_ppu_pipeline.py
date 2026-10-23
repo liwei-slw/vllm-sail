@@ -209,7 +209,6 @@ def test_e2e_workflow_only_exposes_model_smoke() -> None:
         "build_run_id",
         "target",
         "models",
-        "image",
     }
     assert debug["jobs"]["model-tests"]["uses"] == (
         "./.github/workflows/_ppu-model-tests.yaml"
@@ -217,7 +216,6 @@ def test_e2e_workflow_only_exposes_model_smoke() -> None:
     assert set(trigger["workflow_call"]["inputs"]) == {
         "build_run_id",
         "models",
-        "image",
         "pr_mode",
         "pr_head_sha",
         "wheel_source_sha",
@@ -260,7 +258,7 @@ def test_e2e_workflow_keeps_python_frontend_in_isolated_docker() -> None:
     assert "VLLM_VERSION=" not in workflow_text
     assert "VLLM_USE_RUST_FRONTEND=0" in smoke_text
     assert "VLLM_USE_RUST_BENCH=0" in smoke_text
-    assert "PPU_RUNTIME_IMAGE" in workflow_text
+    assert "PPU_RUNTIME_IMAGE" not in workflow_text
     assert 'ppu_runtime_container.sh" model-test' in workflow_text
     # Smoke work is delegated through the checked-in runtime wrapper.
     runtime_text = (ROOT / "scripts/ci/ppu_runtime_container.sh").read_text()

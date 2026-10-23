@@ -30,10 +30,6 @@ on:
         description: Validated SAIL source of the reused wheels
         type: string
         default: ""
-      runtime_image:
-        description: CUDA-compatible runtime image override (blank uses runner PPU_CI_RUNTIME_IMAGE)
-        type: string
-        default: ""
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, ready_for_review, labeled, unlabeled]
@@ -61,8 +57,6 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'ci-preview')) }}
     runs-on: 8-ppu-m890p
     timeout-minutes: 10
-    outputs:
-      image: ${{ steps.resolve.outputs.image }}
     env:
       GIT_CONFIG_NOSYSTEM: "1"
     steps:
@@ -86,14 +80,10 @@ jobs:
           path: ${{ steps.workspace.outputs.source_rel }}
           persist-credentials: false
 
-      - name: Resolve a preloaded CUDA-compatible runtime
-        id: resolve
+      - name: Resolve the runner-configured CUDA-compatible runtime
         env:
           SOURCE_DIR: ${{ steps.workspace.outputs.source }}
-          RUNTIME_IMAGE_OVERRIDE: ${{ inputs.runtime_image || '' }}
-        run: |
-          image="$(bash "${SOURCE_DIR}/scripts/ci/ppu_runtime_image.sh" "${RUNTIME_IMAGE_OVERRIDE}")"
-          printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
+        run: bash "${SOURCE_DIR}/scripts/ci/ppu_runtime_image.sh" >/dev/null
 
   build:
     needs: runtime-image
@@ -132,7 +122,6 @@ jobs:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha || '' }}
-      image: ${{ needs.runtime-image.outputs.image }}
 
   model-tests:
     name: PPU model tests
@@ -156,7 +145,6 @@ jobs:
       pr_head_sha: ${{ inputs.pr_head_sha || github.sha }}
       build_run_id: ${{ inputs.existing_build_run_id || github.run_id }}
       wheel_source_sha: ${{ inputs.wheel_source_sha || '' }}
-      image: ${{ needs.runtime-image.outputs.image }}
 
   gate:
     name: PPU CI gate

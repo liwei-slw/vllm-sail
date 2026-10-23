@@ -73,8 +73,7 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-image_id=$(bash "${source_dir}/scripts/ci/ppu_runtime_image.sh" "${PPU_RUNTIME_IMAGE:-}" 9>&-)
-printf '%s\n' "${PPU_RUNTIME_IMAGE:-${PPU_CI_RUNTIME_IMAGE:-auto}}" >"${artifact_dir}/runtime-image.txt"
+image_id=$(bash "${source_dir}/scripts/ci/ppu_runtime_image.sh" 9>&-)
 printf '%s\n' "${image_id}" >"${artifact_dir}/runtime-image-id.txt"
 
 container="${prefix}"

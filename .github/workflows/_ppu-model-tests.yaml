@@ -23,10 +23,6 @@ on:
         description: Comma-separated model catalog keys
         type: string
         default: qwen3.8-27b-m890p
-      image:
-        description: CUDA-compatible runtime image override (blank uses runner PPU_CI_RUNTIME_IMAGE)
-        type: string
-        default: ""
 
 permissions:
   contents: read
@@ -135,7 +131,6 @@ jobs:
 
       - name: Run PPU E2E smoke in the preloaded CUDA-compatible runtime
         env:
-          PPU_RUNTIME_IMAGE: ${{ inputs.image }}
           PPU_CI_SOURCE_DIR: ${{ steps.runtime.outputs.source }}
           PPU_CI_SOURCE_SHA: ${{ inputs.pr_head_sha || github.sha }}
           PPU_CI_WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}

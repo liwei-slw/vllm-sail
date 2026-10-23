@@ -19,11 +19,6 @@ on:
         required: false
         default: qwen3.8-27b-m890p
         type: string
-      image:
-        description: CUDA-compatible runtime image override (blank uses runner PPU_CI_RUNTIME_IMAGE)
-        required: false
-        default: ""
-        type: string
 
 permissions:
   contents: read
@@ -41,7 +36,6 @@ jobs:
     with:
       pr_mode: false
       build_run_id: ${{ inputs.build_run_id }}
-      image: ${{ inputs.image }}
 
   model-tests:
     name: PPU model tests
@@ -53,5 +47,4 @@ jobs:
     with:
       pr_mode: false
       build_run_id: ${{ inputs.build_run_id }}
-      image: ${{ inputs.image }}
       models: ${{ inputs.models }}

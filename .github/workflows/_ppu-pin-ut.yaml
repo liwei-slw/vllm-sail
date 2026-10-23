@@ -17,10 +17,6 @@ on:
         description: PPU CI build run supplying ppu-wheels-<run_id>
         required: true
         type: string
-      image:
-        description: CUDA-compatible runtime image override (blank uses runner PPU_CI_RUNTIME_IMAGE)
-        type: string
-        default: ""
 
 permissions:
   contents: read
@@ -88,7 +84,6 @@ jobs:
 
       - name: Run pin UT in the preloaded CUDA-compatible runtime
         env:
-          PPU_RUNTIME_IMAGE: ${{ inputs.image }}
           PPU_CI_SOURCE_DIR: ${{ steps.runtime.outputs.source }}
           PPU_CI_SOURCE_SHA: ${{ inputs.pr_head_sha || github.sha }}
           PPU_CI_WHEELS_DIR: ${{ steps.runtime.outputs.wheels }}

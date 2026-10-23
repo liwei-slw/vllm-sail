@@ -326,7 +326,6 @@ def test_pr_pipeline_structure():
         "pr_head_sha",
         "existing_build_run_id",
         "wheel_source_sha",
-        "runtime_image",
     }
     assert inputs["pr_head_sha"]["type"] == "string"
     assert inputs["pr_head_sha"]["required"] is True
@@ -344,9 +343,14 @@ def test_pr_pipeline_structure():
     }
     runtime = jobs["runtime-image"]
     assert runtime["runs-on"] == "8-ppu-m890p"
-    assert runtime["outputs"]["image"] == "${{ steps.resolve.outputs.image }}"
-    resolve = next(step for step in runtime["steps"] if step.get("id") == "resolve")
+    assert "outputs" not in runtime
+    resolve = next(
+        step
+        for step in runtime["steps"]
+        if step.get("name") == "Resolve the runner-configured CUDA-compatible runtime"
+    )
     assert "ppu_runtime_image.sh" in resolve["run"]
+    assert "PPU_CI_RUNTIME_IMAGE" not in resolve.get("env", {})
     build = jobs["build"]
     assert "ci-preview" in build["if"]
     assert "inputs.existing_build_run_id || ''" in build["if"]
@@ -385,7 +389,6 @@ def test_pr_pipeline_structure():
             "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
             "wheel_source_sha": "${{ inputs.wheel_source_sha || '' }}",
             "build_run_id": "${{ inputs.existing_build_run_id || github.run_id }}",
-            "image": "${{ needs.runtime-image.outputs.image }}",
         }
 
 
@@ -453,7 +456,7 @@ def test_debug_structure():
     assert config["name"] == "PPU debug"
     assert set(config[True]) == {"workflow_dispatch"}
     inputs = config[True]["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {"build_run_id", "target", "models", "image"}
+    assert set(inputs) == {"build_run_id", "target", "models"}
     assert inputs["build_run_id"]["type"] == "string"
     assert inputs["build_run_id"]["required"] is True
     assert inputs["target"]["type"] == "choice"
@@ -461,9 +464,6 @@ def test_debug_structure():
     assert inputs["target"]["default"] == "both"
     assert inputs["models"]["type"] == "string"
     assert inputs["models"]["default"] == "qwen3.8-27b-m890p"
-    assert inputs["image"]["type"] == "string"
-    assert inputs["image"]["required"] is False
-    assert inputs["image"]["default"] == ""
     assert "concurrency" not in config
     jobs = config["jobs"]
     assert set(jobs) == {"pin-unit-tests", "model-tests"}
@@ -478,7 +478,6 @@ def test_debug_structure():
         expected = {
             "pr_mode": False,
             "build_run_id": "${{ inputs.build_run_id }}",
-            "image": "${{ inputs.image }}",
         }
         if job_id == "model-tests":
             expected["models"] = "${{ inputs.models }}"
@@ -972,7 +971,7 @@ def test_runtime_workflows_use_the_checked_in_docker_wrapper():
         == 'bash "${PPU_CI_SOURCE_DIR}/scripts/ci/ppu_runtime_container.sh" pin-ut'
     )
     assert pin_step["env"]["PPU_CI_DEVICE_COUNT"] == "1"
-    assert pin_step["env"]["PPU_RUNTIME_IMAGE"] == "${{ inputs.image }}"
+    assert "PPU_RUNTIME_IMAGE" not in pin_step["env"]
     assert pin_step["env"]["PPU_CI_REQUIRE_PR_ARTIFACT"] == "${{ inputs.pr_mode }}"
     assert (
         model_step["run"]
