@@ -148,6 +148,8 @@ def check_score_threshold(
     """Primary gate: accept only finite probabilities meeting the threshold."""
     if not math.isfinite(score) or not 0.0 <= score <= 1.0:
         return (False, f"invalid accuracy score: {score!r}")
+    if not math.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        return (False, f"invalid accuracy threshold: {threshold!r}")
     if score < threshold:
         return (
             False,
