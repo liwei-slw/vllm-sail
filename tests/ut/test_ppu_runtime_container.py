@@ -13,8 +13,8 @@ def test_runtime_wrapper_uses_preloaded_image_and_explicit_ppu_devices():
     assert 'docker image inspect "${PPU_CI_RUNTIME_IMAGE}"' in resolver
     assert 'docker pull "${PPU_CI_RUNTIME_IMAGE}" >"${pull_log}" 2>&1' in resolver
     assert "docker image ls" not in resolver
-    assert "pkg.flytiger-eco.com" not in resolver
-    assert "reg.docker.alibaba-inc.com" not in resolver
+    assert "@sha256:" not in resolver
+    assert "docker_release/llm" not in resolver
     assert "known_image_id" not in resolver
     assert "runtime-image.txt" not in text
     assert "--device=/dev/alixpu" in text

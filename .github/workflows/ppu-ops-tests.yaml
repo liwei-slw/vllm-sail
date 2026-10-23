@@ -9,9 +9,8 @@ on:
         default: download.t-head.cn/docker_release/pytorch@sha256:a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80
         type: string
       ops_image:
-        description: Digest-pinned operator runtime image matching the build stack
-        required: false
-        default: reg.docker.alibaba-inc.com/ai-tmp/llm:pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202610070948
+        description: Digest-pinned operator runtime image (required; value is not stored in the repository)
+        required: true
         type: string
       ops_test_scope:
         description: Initial manual runs always use full; auto remains disabled until qualification

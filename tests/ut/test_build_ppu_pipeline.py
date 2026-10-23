@@ -220,17 +220,14 @@ def test_ci_uses_separate_pinned_build_and_runtime_stacks():
         "download.t-head.cn/docker_release/pytorch@sha256:"
         "a33a67832f7ec442c481421e94255518dd67e464406f8e610c15d2b594b21f80"
     )
-    runtime_image = (
-        "reg.docker.alibaba-inc.com/ai-tmp/llm:"
-        "pytorch2.13.0-ubuntu24.04-cuda13.0-vllm0.27.0-py312-ppu202610070948"
-    )
     workflow = yaml.safe_load(WORKFLOW.read_text())
     inputs = yaml.safe_load((WORKFLOW.parent / "ppu-ops-tests.yaml").read_text())[True][
         "workflow_dispatch"
     ]["inputs"]
     assert not {"sdk_url", "torch_url"} & inputs.keys()
     assert inputs["build_image"]["default"] == build_image
-    assert inputs["ops_image"]["default"] == runtime_image
+    assert inputs["ops_image"]["required"] is True
+    assert "default" not in inputs["ops_image"]
     build = workflow["jobs"]["build"]
     assert build_image in build["container"]["image"]
     assert build["env"]["VLLM_SAIL_BUILD_IMAGE"] == build["container"]["image"]

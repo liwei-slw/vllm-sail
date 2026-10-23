@@ -383,13 +383,12 @@ def test_manual_ops_image_input_contract():
     assert "ops_image" in inputs
     assert "device_image" not in inputs
     assert inputs["ops_image"]["type"] == "string"
-    assert "cuda13.0-vllm0.27.0" in inputs["ops_image"]["default"]
+    assert inputs["ops_image"]["required"] is True
+    assert "default" not in inputs["ops_image"]
     assert (
         "download.t-head.cn/docker_release/pytorch" in inputs["build_image"]["default"]
     )
-    assert inputs["ops_image"]["default"] != inputs["build_image"]["default"]
     assert re.fullmatch(r".+@sha256:[0-9a-f]{64}", inputs["build_image"]["default"])
-    assert ":pytorch2.13.0-" in inputs["ops_image"]["default"]
     step = next(
         s
         for s in workflow["jobs"]["detect-ops-changes"]["steps"]
