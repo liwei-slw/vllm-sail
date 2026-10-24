@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -168,7 +169,9 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     assert "secrets" not in ppu
     assert ppu["with"] == {
         "pr_head_sha": "${{ inputs.head_sha }}",
+        "skip_ppu": "${{ needs.validate.outputs.skip_ppu == 'true' }}",
         "existing_build_run_id": "${{ needs.validate.outputs.existing_build_run_id }}",
+        "native_reuse_run_id": "${{ needs.validate.outputs.native_reuse_run_id }}",
         "wheel_source_sha": "${{ needs.validate.outputs.wheel_source_sha }}",
     }
     validate = jobs["validate"]
@@ -183,7 +186,12 @@ def test_executor_separates_read_only_pr_execution_and_always_reporting():
     assert "continue-on-error" not in step
     assert validate["outputs"] == {
         key: "${{ steps." + step["id"] + ".outputs." + key + " }}"
-        for key in ("existing_build_run_id", "wheel_source_sha")
+        for key in (
+            "skip_ppu",
+            "existing_build_run_id",
+            "native_reuse_run_id",
+            "wheel_source_sha",
+        )
     }
     report = jobs["report"]
     assert report["if"] == "always()"
@@ -320,12 +328,23 @@ def test_pr_pipeline_structure():
     inputs = config[True]["workflow_call"]["inputs"]
     assert set(inputs) == {
         "pr_head_sha",
+        "skip_ppu",
         "existing_build_run_id",
+        "native_reuse_run_id",
         "wheel_source_sha",
     }
     assert inputs["pr_head_sha"]["type"] == "string"
     assert inputs["pr_head_sha"]["required"] is True
-    for name in ("existing_build_run_id", "wheel_source_sha"):
+    assert inputs["skip_ppu"] == {
+        "description": "Report success without allocating PPU runners for non-impacting changes",
+        "type": "boolean",
+        "default": False,
+    }
+    for name in (
+        "existing_build_run_id",
+        "native_reuse_run_id",
+        "wheel_source_sha",
+    ):
         assert inputs[name]["type"] == "string"
         assert inputs[name]["default"] == ""
         assert not inputs[name].get("required", False)
@@ -339,6 +358,7 @@ def test_pr_pipeline_structure():
     }
     runtime = jobs["runtime-image"]
     assert runtime["runs-on"] == "8-ppu-m890p"
+    assert "!inputs.skip_ppu" in runtime["if"]
     assert "outputs" not in runtime
     resolve = next(
         step
@@ -351,7 +371,10 @@ def test_pr_pipeline_structure():
     assert "ci-preview" in build["if"]
     assert "inputs.existing_build_run_id || ''" in build["if"]
     assert build["uses"] == "./.github/workflows/_ppu-build.yaml"
-    assert build["with"] == {"pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}"}
+    assert build["with"] == {
+        "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
+        "native_reuse_run_id": "${{ inputs.native_reuse_run_id || '' }}",
+    }
     assert build["needs"] == "runtime-image"
     assert jobs["gate"]["needs"] == [
         "runtime-image",
@@ -364,6 +387,7 @@ def test_pr_pipeline_structure():
     gate = jobs["gate"]["steps"][0]
     assert gate["env"] == {
         "JOB_RESULTS": "${{ toJSON(needs) }}",
+        "SKIP_PPU": "${{ inputs.skip_ppu }}",
         "EXISTING_BUILD_RUN_ID": "${{ inputs.existing_build_run_id || '' }}",
         "WHEEL_SOURCE_SHA": "${{ inputs.wheel_source_sha || '' }}",
     }
@@ -386,6 +410,48 @@ def test_pr_pipeline_structure():
             "wheel_source_sha": "${{ inputs.wheel_source_sha || '' }}",
             "build_run_id": "${{ inputs.existing_build_run_id || github.run_id }}",
         }
+
+
+def test_docs_only_call_uses_hosted_gate_without_ppu_jobs():
+    jobs = workflow("ppu-build-and-test.yaml")["jobs"]
+    context = {
+        "github.event_name": "workflow_dispatch",
+        "inputs.skip_ppu": True,
+        "inputs.existing_build_run_id": "",
+        "inputs.wheel_source_sha": "",
+        "needs.runtime-image.result": "skipped",
+        "needs.build.result": "skipped",
+    }
+    for job_id in ("runtime-image", "build", "pin-unit-tests", "model-tests"):
+        assert not expression(jobs[job_id]["if"], context)
+    assert expression(jobs["gate"]["if"], context)
+    gate = jobs["gate"]["steps"][0]["run"].replace(
+        "python - <<'PYTHON'", f"{sys.executable} - <<'PYTHON'"
+    )
+    result = subprocess.run(
+        ["bash", "-e", "-c", gate],
+        env={
+            **os.environ,
+            "JOB_RESULTS": json.dumps(
+                {
+                    job: {"result": "skipped"}
+                    for job in (
+                        "runtime-image",
+                        "build",
+                        "pin-unit-tests",
+                        "model-tests",
+                    )
+                }
+            ),
+            "SKIP_PPU": "true",
+            "EXISTING_BUILD_RUN_ID": "",
+            "WHEEL_SOURCE_SHA": "",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "PPU CI skipped: no PPU-impacting changes" in result.stdout
 
 
 def test_ops_manual_entry_structure():
@@ -488,6 +554,7 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
         "build_image",
         "vllm_ref",
         "pytorch_sail_arch",
+        "native_reuse_run_id",
     }
     for value in call["inputs"].values():
         assert value["type"] == "string"
@@ -504,7 +571,29 @@ def test_build_leaf_preserves_retry_identity_and_image_output():
     assert "needs" not in build
     caller = workflow("ppu-build-and-test.yaml")["jobs"]["build"]
     assert caller["uses"] == "./.github/workflows/_ppu-build.yaml"
-    assert caller["with"] == {"pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}"}
+    assert caller["with"] == {
+        "pr_head_sha": "${{ inputs.pr_head_sha || github.sha }}",
+        "native_reuse_run_id": "${{ inputs.native_reuse_run_id || '' }}",
+    }
+    download = next(
+        step
+        for step in build["steps"]
+        if step.get("uses") == "actions/download-artifact@v4"
+    )
+    assert download["if"] == "inputs.native_reuse_run_id != ''"
+    assert download["continue-on-error"] is True
+    assert download["with"] == {
+        "name": "ppu-wheels-${{ inputs.native_reuse_run_id }}",
+        "path": "artifacts/native-reuse",
+        "github-token": "${{ github.token }}",
+        "run-id": "${{ inputs.native_reuse_run_id }}",
+    }
+    package = next(
+        step
+        for step in build["steps"]
+        if step.get("name") == "Build or repackage wheels"
+    )
+    assert "VLLM_SAIL_NATIVE_REUSE_DIR" in package["env"]
 
 
 def test_workflow_filenames_distinguish_reusable_calls_from_entrypoints():
@@ -951,6 +1040,7 @@ def test_consumers_require_build_or_valid_reuse(build_jobs, build, run_id, sourc
         "github.event_name": "workflow_dispatch",
         "github.event.pull_request.draft": False,
         "github.event.pull_request.labels.*.name": [],
+        "inputs.skip_ppu": False,
         "inputs.existing_build_run_id": run_id,
         "inputs.wheel_source_sha": source,
         "needs.runtime-image.result": "success",
@@ -977,6 +1067,7 @@ def test_gate_executes_fail_closed_truth_table(
 ):
     step = build_jobs["gate"]["steps"][0]
     context = {
+        "inputs.skip_ppu": False,
         "inputs.existing_build_run_id": run_id,
         "inputs.wheel_source_sha": source,
     }
