@@ -13,7 +13,7 @@ VLLM_REPOSITORY="${VLLM_REPOSITORY:-https://github.com/vllm-project/vllm.git}"
 VLLM_REF="${VLLM_REF:-$(tr -d '[:space:]' < "${ROOT_DIR}/.github/vllm-main-verified.commit")}"
 PYTORCH_SAIL_ARCH="${PYTORCH_SAIL_ARCH:-ppu_15;ppu_10}"
 # Building the native PPU kernels is memory-heavy (~2 GiB per compile job). The
-# CPU runner exposes many cores but a smaller memory limit, so an unbounded
+# The CI build environment exposes many cores but a smaller memory limit, so an unbounded
 # MAX_JOBS makes the OOM killer terminate the pod (exit 137). Derive a safe
 # default from the cgroup memory limit (falling back to MemTotal) and apply a
 # conservative ceiling. Override explicitly with BUILD_JOBS.
@@ -90,7 +90,7 @@ unset SETUPTOOLS_SCM_PRETEND_VERSION SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM
 unset VLLM_USE_PRECOMPILED VLLM_USE_PRECOMPILED_RUST
 unset VLLM_PRECOMPILED_WHEEL_LOCATION
 # envsetup.sh repoints pip at an internal mirror (art.eng.t-head.cn) that is
-# unreachable from the CPU runner; force the public Aliyun PyPI mirror after the
+# unreachable from the CI build environment; force the public Aliyun PyPI mirror after the
 # SDK env is sourced. Override with SAIL_PIP_INDEX_URL.
 export PIP_INDEX_URL="${SAIL_PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
 export PIP_EXTRA_INDEX_URL=""
@@ -98,9 +98,9 @@ export PIP_CONSTRAINT="${WORK_DIR}/image-constraints.txt"
 
 command -v hgcc
 "${HGCC}" --version 2>&1 | tee "${LOG_DIR}/hgcc-version.log"
-python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" prepare \
+python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" capture \
     --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" \
-    --constraints "${PIP_CONSTRAINT}" | tee -a "${MANIFEST}"
+    --constraints "${PIP_CONSTRAINT}" --require-ppu-headers | tee -a "${MANIFEST}"
 python - <<'PY' 2>&1 | tee "${LOG_DIR}/torch-env.log"
 from pathlib import Path
 import torch
@@ -116,10 +116,20 @@ git init "${VLLM_SRC}"
 git -C "${VLLM_SRC}" remote add origin "${VLLM_REPOSITORY}"
 # setuptools-scm needs history and release tags, including for commit/branch refs.
 # A depth-1 checkout can otherwise produce an unverifiable 0.1.dev1 version.
-git -C "${VLLM_SRC}" fetch --tags origin "${VLLM_REF}"
+for attempt in 1 2 3; do
+    if git -C "${VLLM_SRC}" fetch --tags origin "${VLLM_REF}"; then
+        break
+    fi
+    if ((attempt == 3)); then
+        fail "failed to fetch vLLM after ${attempt} attempts"
+    fi
+    sleep "$((2 ** (attempt - 1)))"
+done
 git -C "${VLLM_SRC}" checkout --detach FETCH_HEAD
 (
     cd "${VLLM_SRC}"
+    export RUSTUP_DIST_SERVER="${RUSTUP_DIST_SERVER:-https://rsproxy.cn}"
+    export RUSTUP_UPDATE_ROOT="${RUSTUP_UPDATE_ROOT:-https://rsproxy.cn/rustup}"
     if ! command -v rustup >/dev/null 2>&1; then
         curl -k --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
             | sh -s -- -y --profile minimal --default-toolchain none
@@ -174,9 +184,11 @@ mapfile -t vllm_wheels < <(
     fail "expected exactly one vLLM wheel, found ${#vllm_wheels[@]}"
 python -m pip install --force-reinstall --no-deps "${vllm_wheels[0]}"
 
-python -m pip install \
-    -r "${ROOT_DIR}/requirements/build.txt" \
-    -r "${ROOT_DIR}/requirements/ppu.txt"
+# The CUDA-free build image intentionally does not carry runtime-only PPU
+# packages such as tokenspeed-mla. They are protected by the image constraints
+# and supplied by the separate CUDA-compatible runtime image, so install only
+# the dependencies needed to compile the plugin here.
+python -m pip install -r "${ROOT_DIR}/requirements/build.txt"
 (
     cd "${ROOT_DIR}"
     python - <<'PY'
@@ -210,7 +222,8 @@ mapfile -t sail_wheels < <(
 [[ -s "${sail_wheels[0]}" ]] || fail "vLLM SAIL wheel is empty"
 
 python "${ROOT_DIR}/scripts/ci/ppu_image_stack.py" verify \
-    --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" | tee -a "${MANIFEST}"
+    --sdk "${PPU_SDK}" --output "${LOG_DIR}/image-stack.json" \
+    --require-ppu-headers | tee -a "${MANIFEST}"
 
 {
     printf 'status=succeeded\n'
