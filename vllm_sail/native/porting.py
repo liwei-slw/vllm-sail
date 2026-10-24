@@ -51,7 +51,8 @@ __all__ = [
 EXCLUDED_OPS_NAME = "excluded_ops.toml"
 
 # Everything the manifest names lives under upstream's csrc/; the vendored tree
-# drops that one level so `csrc/a/b.cu` becomes `csrc/upstream/a/b.cu`.
+# drops that one level and renames compiled TUs, so `csrc/a/b.cu` becomes
+# `csrc/upstream/a/b.hg` (see manifest.vendored_name).
 _CSRC = "csrc/"
 
 # Files in the dest tree that port() must not delete when it rebuilds:
@@ -189,7 +190,13 @@ def port(
         preserve=PRESERVED,
     )
     dest = Path(dest_root).resolve()
-    copied = tuple(dest / path for path in corpus.files)
+    # Copying and translating keep upstream names (sailify keys on them); the
+    # vendor tree renames compiled TUs afterwards.
+    sources = tuple(_manifest.vendored_name(_CSRC + rel) for rel in corpus.sources)
+    for upstream, vendored in zip(corpus.sources, sources, strict=False):
+        if upstream != vendored:
+            (dest / upstream).rename(dest / vendored)
+    copied = tuple(dest / path for path in (*sources, *corpus.headers))
 
     _drop_includes(copied, manifest.drop_includes)
     _replace_text(copied, dest, manifest.replace_text)
@@ -199,7 +206,7 @@ def port(
         render_excluded_ops(manifest, excluded), encoding="utf-8"
     )
     return PortResult(
-        sources=tuple(f"{_manifest.VENDOR_ROOT}/{rel}" for rel in corpus.sources),
+        sources=tuple(f"{_manifest.VENDOR_ROOT}/{rel}" for rel in sources),
         headers=tuple(f"{_manifest.VENDOR_ROOT}/{rel}" for rel in corpus.headers),
         excluded_ops=excluded,
         unclaimed_ops=unclaimed,
@@ -300,7 +307,7 @@ def _resolve(include: str, includer: Path, csrc: Path) -> Path | None:
 
 
 def _vendored(rel: str) -> str:
-    return f"{_manifest.VENDOR_ROOT}/{rel.removeprefix(_CSRC)}"
+    return f"{_manifest.VENDOR_ROOT}/{_manifest.vendored_name(rel)}"
 
 
 def _clean(dest: Path, preserve: frozenset[str] = PRESERVED) -> None:
@@ -355,7 +362,13 @@ def _replace_text(
     files: Sequence[Path], dest: Path, replacements: Mapping[str, Mapping[str, str]]
 ) -> None:
     """Apply exact post-sailify edits; stop on upstream drift, never guess."""
-    copied = {_CSRC + path.relative_to(dest).as_posix(): path for path in files}
+    # The manifest names upstream paths; only compiled TUs carry a vendored
+    # `.hg` suffix, so the inverse mapping back to those keys is unambiguous.
+    copied: dict[str, Path] = {}
+    for path in files:
+        rel = path.relative_to(dest).as_posix()
+        upstream = f"{rel[:-3]}.cu" if rel.endswith(".hg") else rel
+        copied[_CSRC + upstream] = path
     for name, edits in replacements.items():
         if name not in copied:
             raise PortError(f"overlay.replace_text names {name}, which was not copied")
@@ -384,7 +397,7 @@ def _apply_bindings(
     )
     pruned: dict[str, int] = {}
     for rel in manifest.prune_bindings:
-        path = dest / rel.removeprefix(_CSRC)
+        path = dest / _manifest.vendored_name(rel)
         if not path.is_file():
             raise PortError(
                 f"overlay.prune_bindings names {rel}, which this port did not "

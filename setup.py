@@ -20,8 +20,8 @@ Native extensions are the default. The only Python-only path is an explicit
 opt-out; otherwise the build validates every prerequisite before running CMake:
 
 * ``VLLM_SAIL_SKIP_EXT`` truthy -> pure-Python wheel
-* otherwise                    -> require SAIL torch, its compatibility header,
-                                  hgcc and CMake, then configure and build
+* otherwise                    -> require importable torch, hgcc and CMake,
+                                  then configure and build
 
 Missing native prerequisites fail with the first actionable reason. CPU-only
 development and packaging remain available through the explicit opt-out.
