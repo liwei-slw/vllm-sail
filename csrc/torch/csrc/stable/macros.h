@@ -1,4 +1,7 @@
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
+// Adapted from PyTorch's torch/csrc/stable/macros.h (v2.10.0).
+// Upstream copyright notices and BSD terms: LICENSES/PyTorch.txt.
+// Project modifications are licensed under Apache-2.0.
 #pragma once
 
 // Shadows Torch's stable-ABI macros through include-path order (csrc precedes

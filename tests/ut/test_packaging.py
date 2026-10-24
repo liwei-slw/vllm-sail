@@ -179,6 +179,12 @@ def test_built_wheel_and_sdist_are_self_contained(tmp_path: Path) -> None:
         )
         assert metadata["Name"] == "vllm-sail"
         assert metadata["Version"] == "0.0.0"
+        assert metadata["License-Expression"] == "Apache-2.0 AND BSD-3-Clause"
+        license_files = {"LICENSE", "LICENSES/PyTorch.txt", "THIRD_PARTY_NOTICES.md"}
+        assert set(metadata.get_all("License-File")) == license_files
+        for name in license_files:
+            packaged = f"vllm_sail-0.0.0.dist-info/licenses/{name}"
+            assert archive.read(packaged) == (root / name).read_bytes()
         config_paths = {
             path.relative_to(root).as_posix()
             for path in (root / "vllm_sail").rglob("*.json")
@@ -187,6 +193,10 @@ def test_built_wheel_and_sdist_are_self_contained(tmp_path: Path) -> None:
 
     with tarfile.open(sdist) as archive:
         sdist_names = set(archive.getnames())
+        for name in license_files:
+            member = archive.extractfile(f"vllm_sail-0.0.0/{name}")
+            assert member is not None
+            assert member.read() == (root / name).read_bytes()
     prefix = next(name.split("/", 1)[0] for name in sdist_names if "/" in name)
     native_suffixes = {".cpp", ".cuh", ".hg", ".h", ".hpp", ".toml"}
     required_build_inputs = {
